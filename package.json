@@ -1,0 +1,30 @@
+{
+  "name": "opengate",
+  "version": "0.1.0",
+  "description": "A coding agent for your AI gateway: an interactive terminal agent and an ACP agent for T3 Code, Zed and JetBrains, using any model your gateway offers.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "opengate": "src/cli.ts"
+  },
+  "scripts": {
+    "start": "bun src/cli.ts",
+    "acp": "bun src/cli.ts acp",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p .",
+    "build": "bun scripts/build.ts",
+    "smoke:acp": "bun scripts/acp-smoke.ts"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "2.12.0",
+    "@anthropic-ai/sdk": "^1.14.0",
+    "openai": "^7.64.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  },
+  "engines": {
+    "bun": ">=1.3"
+  }
+}
