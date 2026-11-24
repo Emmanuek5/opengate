@@ -236,3 +236,37 @@ describe("cli", () => {
     expect(() => parseArgs(["--mode", "yolo"])).toThrow();
   });
 });
+
+describe("login", () => {
+  test("--key-stdin reads a piped key, checks it and saves the settings", async () => {
+    const seen: string[] = [];
+    const gw = Bun.serve({
+      port: 0,
+      fetch(req) {
+        seen.push(req.headers.get("authorization") ?? "");
+        return Response.json({ object: "list", data: [{ id: "claude-opus-5-5" }, { id: "gpt-image-2" }] });
+      },
+    });
+    const ogHome = mkdtempSync(join(tmpdir(), "og-login-"));
+    try {
+      const p = Bun.spawn([process.execPath, join(import.meta.dir, "..", "src", "cli.ts"), "login", "--url", `http://127.0.0.1:${gw.port}`, "--key-stdin"], {
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, OPENGATE_HOME: ogHome, OPENGATE_URL: "", OPENGATE_KEY: "", NO_COLOR: "1" },
+      });
+      p.stdin.write("sk-test-key-123\r\n");
+      await p.stdin.end();
+      const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
+      expect(err).toBe("");
+      expect(code).toBe(0);
+      expect(out).toContain("1 models available");
+      expect(out).not.toContain("sk-test-key-123");
+      expect(seen).toEqual(["Bearer sk-test-key-123"]);
+      const saved = JSON.parse(readFileSync(join(ogHome, "config", "config.json"), "utf8"));
+      expect(saved).toMatchObject({ url: `http://127.0.0.1:${gw.port}`, key: "sk-test-key-123", model: "claude-opus-5-5" });
+    } finally {
+      gw.stop(true);
+    }
+  });
+});

@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { Session } from "./agent";
 import { pickModel, runAcp } from "./acp";
 import { configPath, EFFORTS, loadConfig, MODES, normalizeUrl, saveConfig, VERSION, type Config, type Mode } from "./config";
@@ -16,6 +17,7 @@ Usage:
   opengate -p "prompt"           run one prompt and print the answer
   opengate acp                   serve ACP on stdin/stdout (T3 Code, Zed, JetBrains…)
   opengate login                 connect to a gateway (asks for the URL and your key)
+           [--url <url>] [--key-stdin]   or give the URL, and pipe the key in on stdin
   opengate logout                forget the saved key
   opengate models [filter]       list the models your key can use
   opengate sessions              recent sessions in this folder
@@ -36,10 +38,22 @@ Environment: OPENGATE_URL, OPENGATE_KEY, OPENGATE_MODEL override the saved setti
 
 // ---------------- prompts on the terminal ----------------
 
+// Node streams and readline, not Bun's stdin shortcuts: on Windows those can let the process
+// exit before a piped read finishes.
 async function ask(question: string): Promise<string> {
-  process.stdout.write(question);
-  for await (const line of console) return line.trim();
-  return "";
+  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: !!process.stdin.isTTY });
+  try {
+    return (await rl.question(question)).trim();
+  } finally {
+    rl.close();
+  }
+}
+
+/** Everything piped in on stdin. */
+export async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 /** Read a secret without echoing it. */
@@ -86,7 +100,7 @@ async function login(a: Args) {
   if (!url) throw new Error("a gateway URL is needed, e.g. https://gateway.example.com:8317");
   url = normalizeUrl(url);
   let key = a.key ?? "";
-  if (a.keyStdin) key = (await Bun.stdin.text()).trim();
+  if (a.keyStdin) key = (await readStdin()).trim();
   if (!key) key = await askSecret("API key: ");
   if (!key) throw new Error("a key is needed");
   const gw = new Gateway(url, key);
@@ -159,7 +173,7 @@ async function main() {
   if (a.effort) session.setEffort(a.effort);
 
   if (a.print !== undefined) {
-    const text = a.print === "-" ? await Bun.stdin.text() : a.print;
+    const text = a.print === "-" ? await readStdin() : a.print;
     const ac = () => session.cancel();
     process.on("SIGINT", ac);
     const stop = await session.prompt([{ type: "text", text }], new PrintUI());
