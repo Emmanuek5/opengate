@@ -1,0 +1,198 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap");
+
+:root {
+  --bg: #07090f;
+  --panel: #0d111b;
+  --panel-2: #111726;
+  --line: rgba(148, 163, 184, 0.14);
+  --line-2: rgba(148, 163, 184, 0.24);
+  --tx: #e7ecf5;
+  --dim: #8b96ab;
+  --dimmer: #5d677c;
+  --teal: #5eead4;
+  --cyan: #67e8f9;
+  --violet: #a5b4fc;
+  --indigo: #818cf8;
+  --pink: #f0abfc;
+  --amber: #fcd34d;
+  --green: #86efac;
+  --red: #fca5a5;
+  --grad: linear-gradient(135deg, #5eead4 0%, #67e8f9 35%, #818cf8 100%);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--tx);
+  font-family: Inter, "Segoe UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+.canvas {
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(900px 520px at 8% -10%, rgba(94, 234, 212, 0.16), transparent 60%),
+    radial-gradient(800px 600px at 100% 30%, rgba(129, 140, 248, 0.18), transparent 60%),
+    radial-gradient(700px 400px at 50% 120%, rgba(240, 171, 252, 0.08), transparent 60%),
+    var(--bg);
+}
+
+/* faint grid that fades out */
+.canvas::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse 80% 70% at 40% 40%, black 10%, transparent 75%);
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.canvas > * {
+  position: relative;
+}
+
+.wordmark {
+  font-weight: 800;
+  letter-spacing: -0.045em;
+  line-height: 1;
+}
+
+.grad-text {
+  background: var(--grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  background: rgba(17, 23, 38, 0.7);
+  color: #cbd5e1;
+  font-size: 15px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.pill i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--teal);
+  box-shadow: 0 0 10px var(--teal);
+}
+
+/* terminal window */
+.term {
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(17, 23, 38, 0.96), rgba(10, 13, 22, 0.98));
+  border: 1px solid var(--line-2);
+  box-shadow:
+    0 40px 80px -20px rgba(0, 0, 0, 0.7),
+    0 0 0 1px rgba(255, 255, 255, 0.02) inset,
+    0 0 80px -20px rgba(129, 140, 248, 0.35);
+  overflow: hidden;
+}
+
+.term .bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.term .bar b {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #2a3142;
+}
+
+.term .bar b:nth-child(1) {
+  background: #ff6b6b;
+}
+.term .bar b:nth-child(2) {
+  background: #fcc46a;
+}
+.term .bar b:nth-child(3) {
+  background: #5fd98a;
+}
+
+.term .bar span {
+  margin-left: 10px;
+  color: var(--dimmer);
+  font: 500 13px "JetBrains Mono", monospace;
+}
+
+.term pre {
+  padding: 18px 22px 22px;
+  font: 400 14.5px/1.62 "JetBrains Mono", ui-monospace, monospace;
+  color: #d6deeb;
+  white-space: pre;
+}
+
+.t-dim {
+  color: var(--dimmer);
+}
+.t-mid {
+  color: var(--dim);
+}
+.t-b {
+  color: #fff;
+  font-weight: 600;
+}
+.t-cyan {
+  color: var(--cyan);
+}
+.t-teal {
+  color: var(--teal);
+}
+.t-violet {
+  color: var(--violet);
+}
+.t-pink {
+  color: var(--pink);
+}
+.t-amber {
+  color: var(--amber);
+}
+.t-green {
+  color: var(--green);
+}
+.t-red {
+  color: var(--red);
+}
+.t-think {
+  color: #7b869c;
+  font-style: italic;
+}
+.t-add {
+  color: var(--green);
+  background: rgba(134, 239, 172, 0.07);
+}
+.t-del {
+  color: var(--red);
+  background: rgba(252, 165, 165, 0.07);
+}
+
+.mono {
+  font-family: "JetBrains Mono", monospace;
+}

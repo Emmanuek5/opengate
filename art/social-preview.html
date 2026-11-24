@@ -1,0 +1,71 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="base.css" />
+    <style>
+      .canvas {
+        width: 1280px;
+        height: 640px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 26px;
+      }
+      .brand img {
+        width: 112px;
+        height: 112px;
+        filter: drop-shadow(0 14px 40px rgba(103, 232, 249, 0.4));
+      }
+      .brand .wordmark {
+        font-size: 128px;
+      }
+      h2 {
+        margin-top: 34px;
+        font-size: 40px;
+        font-weight: 700;
+        letter-spacing: -0.025em;
+      }
+      .pills {
+        margin-top: 34px;
+        display: flex;
+        gap: 12px;
+      }
+      .pill {
+        font-size: 19px;
+        padding: 10px 18px;
+      }
+      .pill:nth-child(2) i {
+        background: var(--indigo);
+        box-shadow: 0 0 10px var(--indigo);
+      }
+      .pill:nth-child(3) i {
+        background: var(--pink);
+        box-shadow: 0 0 10px var(--pink);
+      }
+      .canvas::before {
+        mask-image: radial-gradient(ellipse 70% 70% at 50% 50%, black 10%, transparent 75%);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="canvas">
+      <div class="brand">
+        <img src="logo.svg" alt="" />
+        <div class="wordmark">open<span class="grad-text">gate</span></div>
+      </div>
+      <h2>A coding agent for your own AI gateway</h2>
+      <div class="pills">
+        <span class="pill"><i></i>Terminal + ACP</span>
+        <span class="pill"><i></i>Any model your gateway serves</span>
+        <span class="pill"><i></i>Linux · macOS · Windows</span>
+      </div>
+    </div>
+  </body>
+</html>

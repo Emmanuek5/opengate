@@ -1,0 +1,110 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="base.css" />
+    <style>
+      .canvas {
+        width: 1280px;
+        height: 600px;
+        display: grid;
+        grid-template-columns: 540px 1fr;
+        align-items: center;
+        gap: 40px;
+        padding: 0 92px 0 76px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+      }
+      .brand img {
+        width: 76px;
+        height: 76px;
+        filter: drop-shadow(0 10px 30px rgba(103, 232, 249, 0.35));
+      }
+      .brand .wordmark {
+        font-size: 84px;
+      }
+      h2 {
+        margin-top: 30px;
+        font-size: 31px;
+        line-height: 1.25;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        color: #f1f5fb;
+      }
+      p {
+        margin-top: 16px;
+        font-size: 18px;
+        line-height: 1.6;
+        color: var(--dim);
+        max-width: 470px;
+      }
+      .pills {
+        margin-top: 30px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+      .pill:nth-child(2) i {
+        background: var(--indigo);
+        box-shadow: 0 0 10px var(--indigo);
+      }
+      .pill:nth-child(3) i {
+        background: var(--pink);
+        box-shadow: 0 0 10px var(--pink);
+      }
+      .term {
+        width: 596px;
+        justify-self: end;
+        transform: perspective(1600px) rotateY(-7deg) rotateX(2deg);
+        transform-origin: right center;
+      }
+      .term pre {
+        font-size: 14px;
+        line-height: 1.6;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="canvas">
+      <div>
+        <div class="brand">
+          <img src="logo.svg" alt="" />
+          <div class="wordmark">open<span class="grad-text">gate</span></div>
+        </div>
+        <h2>A coding agent for<br />your own AI gateway.</h2>
+        <p>Runs in your terminal, and inside T3&nbsp;Code, Zed and JetBrains over ACP. Use any model your gateway serves, from a single binary.</p>
+        <div class="pills">
+          <span class="pill"><i></i>Terminal + ACP</span>
+          <span class="pill"><i></i>Claude · GPT · Grok · Gemini</span>
+          <span class="pill"><i></i>Linux · macOS · Windows</span>
+        </div>
+      </div>
+      <div class="term">
+        <div class="bar"><b></b><b></b><b></b><span>opengate — ~/projects/api</span></div>
+<pre><span class="t-b">opengate</span> <span class="t-dim">0.1.0</span>  <span class="t-dim">~/projects/api</span>
+<span class="t-dim">claude-opus-5-5 · Ask</span>
+
+<span class="t-cyan">›</span> the login test fails, fix it
+
+<span class="t-think">✻ A missing token makes verifyToken throw, so the</span>
+<span class="t-think">  handler returns 500 where the test expects 401…</span>
+<span class="t-cyan">●</span> <span class="t-b">Search for verifyToken</span>
+  <span class="t-dim">⎿ 3 results</span>
+<span class="t-cyan">●</span> <span class="t-b">Read src/auth.ts</span>
+  <span class="t-dim">⎿ 84 lines</span>
+<span class="t-pink">●</span> <span class="t-b">Edit src/auth.ts</span>
+    <span class="t-dim">@ line 41</span>
+    <span class="t-del">- const user = await verifyToken(req.headers.auth)</span>
+    <span class="t-add">+ if (!req.headers.auth) return res.status(401).end()</span>
+<span class="t-amber">●</span> <span class="t-b">Run bun test</span>
+  <span class="t-dim">⎿ 42 pass · 0 fail</span>
+
+A missing token now returns <span class="t-teal">401</span> instead of crashing.
+All 42 tests pass.</pre>
+      </div>
+    </div>
+  </body>
+</html>
