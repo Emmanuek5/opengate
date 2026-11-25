@@ -15,6 +15,8 @@ export interface SessionMeta {
   usage: Usage;
   /** input tokens of the latest call: how full the context is */
   contextUsed: number;
+  /** subagents: the session that started this one (hidden from session lists) */
+  parentId?: string;
 }
 
 export interface SessionFile extends SessionMeta {
@@ -63,6 +65,7 @@ export function listSessions(cwd?: string, limit = 50): SessionMeta[] {
     const s = loadSession(f.slice(0, -5));
     if (!s) continue;
     if (cwd && s.cwd !== cwd) continue;
+    if (s.parentId) continue;
     const { messages: _m, version: _v, ...meta } = s;
     out.push(meta);
     if (out.length >= limit) break;

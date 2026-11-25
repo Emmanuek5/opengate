@@ -7,6 +7,7 @@ import { dataDir, EFFORTS, MODES, VERSION, type Config, type Mode } from "./conf
 import { Gateway, groupModels } from "./gateway";
 import { listSessions, loadSession } from "./store";
 import type { Diff, ToolResult } from "./tools";
+import { getCommand, getCommands } from "./ext";
 
 // ---------------- colors ----------------
 
@@ -165,7 +166,7 @@ export class Tui implements AgentUI {
 
   private promptText() {
     const mode = this.s.data.mode;
-    const tag = mode === "auto" ? c.red(" auto") : mode === "edits" ? c.magenta(" auto-edit") : "";
+    const tag = mode === "yolo" ? c.red(" full-auto") : mode === "auto" ? c.yellow(" auto") : mode === "edits" ? c.magenta(" auto-edit") : "";
     return `${c.cyan("›")}${tag} `;
   }
 
@@ -317,6 +318,7 @@ export class Tui implements AgentUI {
             `${c.bold("/compact")}          summarize the conversation to free up context`,
             `${c.bold("/usage")}            tokens used in this session`,
             `${c.bold("/exit")}             quit`,
+            ...getCommands().map((x) => `${c.bold("/" + x.name)}${x.args ? " " + x.args : ""}  ${x.description}`),
             c.dim("End a line with \\ to keep typing on the next line. Pasting several lines sends them as one message."),
             "",
           ].join("\n") + "\n",
@@ -401,8 +403,18 @@ export class Tui implements AgentUI {
       case "exit":
       case "quit":
         process.exit(0);
-      default:
+      default: {
+        const ext = getCommand(cmd);
+        if (ext) {
+          try {
+            await ext.run({ session: this.s, args: arg, ui: this, print: (t) => this.write(t.endsWith("\n") ? t : t + "\n") });
+          } catch (e) {
+            this.notice(`/${cmd} failed: ${(e as Error).message}`, "error");
+          }
+          return;
+        }
         this.notice(`Unknown command /${cmd}. Try /help.`, "warn");
+      }
     }
   }
 }

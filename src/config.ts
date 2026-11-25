@@ -22,11 +22,12 @@ export function dataDir(): string {
   return join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "opengate");
 }
 
-export type Mode = "ask" | "edits" | "auto";
+export type Mode = "ask" | "edits" | "auto" | "yolo";
 export const MODES: { id: Mode; name: string; description: string }[] = [
   { id: "ask", name: "Ask", description: "Ask before editing files or running commands" },
   { id: "edits", name: "Auto-edit", description: "Edit files without asking; ask before running commands" },
-  { id: "auto", name: "Full auto", description: "Never ask" },
+  { id: "auto", name: "Auto", description: "A safety model approves safe actions and asks about risky ones" },
+  { id: "yolo", name: "Full auto", description: "Never ask (your deny rules still apply)" },
 ];
 export const EFFORTS = ["auto", "low", "medium", "high", "xhigh", "max"] as const;
 
@@ -37,6 +38,10 @@ export interface Config {
   model?: string;
   mode?: Mode;
   effort?: string;
+  /** permission rules applied in every mode, e.g. { deny: ["shell:rm -rf *"], allow: ["shell:git status*"] } */
+  permissions?: { allow?: string[]; deny?: string[] };
+  /** the model that reviews actions in auto mode (default claude-haiku-5-5) */
+  guardModel?: string;
   /** context window per model id (or prefix ending in *), for compaction */
   contextWindows?: Record<string, number>;
 }

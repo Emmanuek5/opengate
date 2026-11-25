@@ -9,6 +9,12 @@ export type ToolKind = "read" | "edit" | "search" | "execute" | "other";
 export interface ToolCtx {
   cwd: string;
   signal?: AbortSignal;
+  /** the running session (gateway, config, history); absent in isolated tool tests */
+  session?: import("./agent").Session;
+  /** the front end, for events (see ext.ts AgentEvent) */
+  ui?: import("./agent").AgentUI;
+  /** this tool call's id */
+  callId?: string;
   /** files read this session, with the mtime seen, so edits never overwrite unseen changes */
   readFiles: Map<string, number>;
 }
@@ -30,8 +36,14 @@ export interface ToolResult {
 export interface Tool {
   spec: ToolSpec;
   kind: ToolKind;
-  /** whether this call needs the person's OK in a mode */
+  /**
+   * Whether this tool changes things, so needs the person's OK in this mode ("ask" / "edits").
+   * In "auto" mode a tool that asks in "ask" mode goes to the permission policy (the safety guard);
+   * in "yolo" mode nothing asks.
+   */
   asks(mode: Mode): boolean;
+  /** safe to run at the same time as other parallel tools from the same turn (read-only tools, subagents) */
+  parallel?: boolean;
   title(input: any, cwd: string): string;
   paths(input: any, cwd: string): string[];
   /** what an edit would change, shown when asking */
@@ -88,6 +100,7 @@ const readFile: Tool = {
     },
   },
   kind: "read",
+  parallel: true,
   asks: () => false,
   title: (i, cwd) => `Read ${shown(abs(i.path, cwd), cwd)}`,
   paths: (i, cwd) => [abs(i.path, cwd)],
@@ -239,6 +252,7 @@ const glob: Tool = {
     },
   },
   kind: "search",
+  parallel: true,
   asks: () => false,
   title: (i) => `Find ${str(i.pattern)}`,
   paths: (i, cwd) => [i.path ? abs(i.path, cwd) : cwd],
@@ -284,6 +298,7 @@ const grep: Tool = {
     },
   },
   kind: "search",
+  parallel: true,
   asks: () => false,
   title: (i) => `Search for ${str(i.pattern)}`,
   paths: (i, cwd) => [i.path ? abs(i.path, cwd) : cwd],
@@ -417,7 +432,7 @@ const bashTool: Tool = {
     },
   },
   kind: "execute",
-  asks: (mode) => mode !== "auto",
+  asks: (mode) => mode !== "yolo",
   title: (i) => str(i.description) || `Run ${str(i.command).split("\n")[0].slice(0, 80)}`,
   paths: () => [],
   async run(i, ctx) {

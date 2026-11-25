@@ -9,6 +9,7 @@ import { Gateway, groupModels } from "./gateway";
 import { listSessions, loadSession } from "./store";
 import { ago, c, PrintUI, Tui } from "./tui";
 import { parseArgs, type Args } from "./cli-args";
+import "./features";
 
 const HELP = `${c.bold("opengate")} ${VERSION} — a coding agent for your AI gateway
 

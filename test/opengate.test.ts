@@ -15,6 +15,7 @@ const { toResponsesInput } = await import("../src/llm/responses");
 const { toChat } = await import("../src/llm/chat");
 const { applyEdit, toolByName } = await import("../src/tools");
 const { parseArgs } = await import("../src/cli-args");
+const ext = await import("../src/ext");
 import type { Llm, LlmRequest, LlmTurn, Msg } from "../src/types";
 
 /** A model that plays back scripted turns and records what it was sent. */
@@ -173,6 +174,63 @@ describe("agent loop", () => {
   });
 });
 
+describe("permissions and extensions", () => {
+  test("auto mode follows the policy; deny wins in every mode; yolo never asks", async () => {
+    const decisions: Record<string, "allow" | "ask" | "deny"> = { "echo ok": "allow", "make deploy": "ask", "rm -rf /": "deny" };
+    ext.registerPermissionPolicy({ name: "test-guard", decide: ({ call }) => (call.name === "shell" ? { decision: decisions[call.input.command] ?? "ask", reason: `policy says ${decisions[call.input.command]}` } : null) });
+    const run = async (mode: any, command: string, answer: "once" | "deny" = "deny") => {
+      const llm = new FakeLlm([() => ({ parts: [{ type: "tool_call", id: "1", name: "shell", input: { command } }] }), () => ({ parts: [{ type: "text", text: "ok" }] })]);
+      const s = Session.create({ llm: () => llm }, {}, { cwd: dir, model: "m", mode });
+      const u = ui([answer]);
+      await s.prompt([{ type: "text", text: "go" }], u);
+      const out = (llm.calls[1].messages.at(-1)!.parts[0] as any).output as string;
+      return { asked: u.log.includes("ask:shell"), out };
+    };
+    expect(await run("auto", "echo ok")).toMatchObject({ asked: false });
+    expect((await run("auto", "echo ok")).out).toContain("ok");
+    expect((await run("auto", "make deploy")).asked).toBe(true);
+    const blocked = await run("yolo", "rm -rf /");
+    expect(blocked.asked).toBe(false);
+    expect(blocked.out).toContain("blocked by test-guard");
+    expect((await run("yolo", "make deploy", "deny")).asked).toBe(false);
+    expect((await run("ask", "echo ok")).asked).toBe(true);
+  });
+
+  test("extension tools are offered, prompt sections are added, and parallel tools run together", async () => {
+    let running = 0;
+    let peak = 0;
+    const slow = (name: string) => ({
+      spec: { name, description: "test", parameters: { type: "object", properties: {} } },
+      kind: "read" as const,
+      parallel: true,
+      asks: () => false,
+      title: () => name,
+      paths: () => [],
+      async run() {
+        running++;
+        peak = Math.max(peak, running);
+        await Bun.sleep(30);
+        running--;
+        return { output: `${name} done` };
+      },
+    });
+    ext.registerToolProvider({ name: "test-tools", tools: () => [slow("slow_a"), slow("slow_b")] });
+    ext.registerPromptSection({ name: "test-section", render: () => "SECTION-MARKER" });
+    const llm = new FakeLlm([
+      (req) => {
+        expect(req.tools.map((t) => t.name)).toContain("slow_a");
+        expect(req.system).toContain("SECTION-MARKER");
+        return { parts: [{ type: "tool_call", id: "a", name: "slow_a", input: {} }, { type: "tool_call", id: "b", name: "slow_b", input: {} }] };
+      },
+      () => ({ parts: [{ type: "text", text: "ok" }] }),
+    ]);
+    const s = Session.create({ llm: () => llm }, {}, { cwd: dir, model: "m" });
+    await s.prompt([{ type: "text", text: "go" }], ui());
+    expect(peak).toBe(2);
+    expect(llm.calls[1].messages.at(-1)!.parts.map((p: any) => p.output)).toEqual(["slow_a done", "slow_b done"]);
+  });
+});
+
 describe("ACP", () => {
   test("new session, prompt with a permission request, list and load", async () => {
     writeFileSync(join(dir, "a.txt"), "old\n");
@@ -233,7 +291,8 @@ describe("cli", () => {
     expect(parseArgs(["-m", "grok-4.7", "--mode", "auto", "fix", "it"])).toMatchObject({ model: "grok-4.7", mode: "auto", rest: ["fix", "it"] });
     expect(parseArgs(["-r"]).resume).toBe(true);
     expect(parseArgs(["-r", "abc"]).resume).toBe("abc");
-    expect(() => parseArgs(["--mode", "yolo"])).toThrow();
+    expect(parseArgs(["--mode", "yolo"]).mode).toBe("yolo");
+    expect(() => parseArgs(["--mode", "nope"])).toThrow();
   });
 });
 

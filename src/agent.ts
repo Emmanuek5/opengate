@@ -2,7 +2,8 @@ import type { Config, Mode } from "./config";
 import { apiFor, contextWindow, type Gateway } from "./gateway";
 import { COMPACT_PROMPT, systemPrompt } from "./prompt";
 import { newId, saveSession, type SessionFile } from "./store";
-import { toolByName, TOOLS, type Diff, type ToolKind, type ToolResult } from "./tools";
+import { getPermissionPolicies, getPromptSections, getSessionHooks, getToolProviders, type AgentEvent, type PermissionVerdict } from "./ext";
+import { TOOLS, type Diff, type Tool, type ToolCtx, type ToolKind, type ToolResult } from "./tools";
 import { emptyUsage, type Llm, type Msg, type Part } from "./types";
 
 export type StopReason = "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled";
@@ -15,6 +16,8 @@ export interface ToolCallInfo {
   title: string;
   kind: ToolKind;
   paths: string[];
+  /** why the person is being asked (e.g. the safety guard's reason), if any */
+  reason?: string;
 }
 
 /** What a front end (terminal or ACP) shows while the agent works. */
@@ -29,6 +32,8 @@ export interface AgentUI {
   notice?(message: string, level: "info" | "warn" | "error"): void;
   /** after each model call: tokens and context use */
   usage?(s: Session): void;
+  /** anything else worth showing (subagents, memory, skills, MCP); see AgentEvent in ext.ts */
+  event?(e: AgentEvent): void;
 }
 
 const MAX_STEPS = 200;
@@ -39,29 +44,101 @@ export interface NewSession {
   mode?: Mode;
   effort?: string;
   id?: string;
+  /** set for subagents: the session that started this one */
+  parentId?: string;
 }
 
 export class Session {
   readonly readFiles = new Map<string, number>();
   readonly allowAlways = new Set<string>();
+  /** state that features keep for this session (MCP clients, …); never saved */
+  readonly runtime = new Map<string, unknown>();
   private running: AbortController | null = null;
   private system: string;
+  private started: Promise<void> | null = null;
+  /** the tools offered in the current prompt */
+  private toolset: Tool[] = TOOLS;
 
   constructor(
     public data: SessionFile,
-    private gateway: Pick<Gateway, "llm">,
-    private cfg: Config = {},
+    public readonly gateway: Pick<Gateway, "llm"> & Partial<Pick<Gateway, "models" | "url">>,
+    public readonly cfg: Config = {},
   ) {
     this.system = systemPrompt(data.cwd);
   }
 
-  static create(gateway: Pick<Gateway, "llm">, cfg: Config, o: NewSession): Session {
+  static create(gateway: Session["gateway"], cfg: Config, o: NewSession): Session {
     const now = Date.now();
     return new Session(
-      { version: 1, id: o.id ?? newId(), cwd: o.cwd, title: null, model: o.model, mode: o.mode ?? cfg.mode ?? "ask", effort: o.effort ?? cfg.effort ?? "auto", created: now, updated: now, usage: emptyUsage(), contextUsed: 0, messages: [] },
+      {
+        version: 1,
+        id: o.id ?? newId(),
+        cwd: o.cwd,
+        title: null,
+        model: o.model,
+        mode: o.mode ?? cfg.mode ?? "ask",
+        effort: o.effort ?? cfg.effort ?? "auto",
+        created: now,
+        updated: now,
+        usage: emptyUsage(),
+        contextUsed: 0,
+        messages: [],
+        ...(o.parentId ? { parentId: o.parentId } : {}),
+      },
       gateway,
       cfg,
     );
+  }
+
+  /** Run the session hooks once (connect MCP servers, …). Called before the first prompt. */
+  start(): Promise<void> {
+    this.started ??= (async () => {
+      for (const h of getSessionHooks()) {
+        try {
+          await h.start?.(this);
+        } catch (e) {
+          console.error(`opengate: ${h.name} failed to start: ${(e as Error)?.message ?? e}`);
+        }
+      }
+    })();
+    return this.started;
+  }
+
+  async dispose(): Promise<void> {
+    this.cancel();
+    for (const h of getSessionHooks()) {
+      try {
+        await h.dispose?.(this);
+      } catch {}
+    }
+  }
+
+  /** Built-in tools plus every provider's, by name (later duplicates are dropped). */
+  async tools(): Promise<Tool[]> {
+    const all = [...TOOLS];
+    for (const p of getToolProviders()) {
+      try {
+        all.push(...(await p.tools(this)));
+      } catch (e) {
+        console.error(`opengate: tools from ${p.name} failed: ${(e as Error)?.message ?? e}`);
+      }
+    }
+    const seen = new Set<string>();
+    return all.filter((t) => !seen.has(t.spec.name) && seen.add(t.spec.name));
+  }
+
+  /** The system prompt: built-in instructions plus every prompt section. */
+  async systemPrompt(): Promise<string> {
+    let s = systemPrompt(this.data.cwd);
+    for (const sec of getPromptSections()) {
+      try {
+        const text = await sec.render(this);
+        if (text?.trim()) s += `\n\n${text.trim()}`;
+      } catch (e) {
+        console.error(`opengate: prompt section ${sec.name} failed: ${(e as Error)?.message ?? e}`);
+      }
+    }
+    return s;
   }
 
   get id() {
@@ -106,6 +183,9 @@ export class Session {
     const ac = new AbortController();
     this.running = ac;
     try {
+      await this.start();
+      this.toolset = await this.tools();
+      this.system = await this.systemPrompt();
       const text = parts.filter((p) => p.type === "text").map((p: any) => p.text).join(" ").trim();
       if (!this.data.title && text) this.data.title = text.replace(/\s+/g, " ").slice(0, 80);
       if (this.data.contextUsed > this.contextSize * 0.8 && this.data.messages.length >= 2) await this.compact(ui, ac.signal);
@@ -119,7 +199,7 @@ export class Session {
   }
 
   private async loop(ui: AgentUI, signal: AbortSignal): Promise<StopReason> {
-    const tools = TOOLS.map((t) => t.spec);
+    const tools = this.toolset.map((t) => t.spec);
     for (let step = 0; step < MAX_STEPS; step++) {
       if (signal.aborted) return "cancelled";
       // Nearly full mid-turn: summarize and carry on.
@@ -165,10 +245,18 @@ export class Session {
       const calls = turn.parts.filter((p) => p.type === "tool_call") as Extract<Part, { type: "tool_call" }>[];
       if (!calls.length) return turn.stop === "max_tokens" ? "max_tokens" : "end_turn";
 
+      // Calls run in order, except that neighbouring parallel-safe calls (reads, searches,
+      // subagents) run at the same time. Results go back in the order the model asked.
       const results: Part[] = [];
-      for (const c of calls) {
-        const r = await this.runTool(c, ui, signal, turn.stop === "max_tokens");
-        results.push({ type: "tool_result", id: c.id, name: c.name, output: r.output, ...(r.isError ? { isError: true } : {}) });
+      const byName = new Map(this.toolset.map((t) => [t.spec.name, t]));
+      const cutOff = turn.stop === "max_tokens";
+      for (let i = 0; i < calls.length; ) {
+        let j = i + 1;
+        if (byName.get(calls[i].name)?.parallel) while (j < calls.length && byName.get(calls[j].name)?.parallel) j++;
+        const batch = calls.slice(i, j);
+        const done = await Promise.all(batch.map((c) => this.runTool(c, ui, signal, cutOff)));
+        batch.forEach((c, k) => results.push({ type: "tool_result", id: c.id, name: c.name, output: done[k].output, ...(done[k].isError ? { isError: true } : {}) }));
+        i = j;
       }
       this.data.messages.push({ role: "user", parts: results, ts: Date.now() });
       this.save();
@@ -178,7 +266,7 @@ export class Session {
   }
 
   private async runTool(c: Extract<Part, { type: "tool_call" }>, ui: AgentUI, signal: AbortSignal, cutOff: boolean): Promise<ToolResult> {
-    const tool = toolByName.get(c.name);
+    const tool = this.toolset.find((t) => t.spec.name === c.name);
     const input: any = c.input && typeof c.input === "object" ? c.input : {};
     let title = c.name;
     let paths: string[] = [];
@@ -195,25 +283,58 @@ export class Session {
       return r;
     };
     if (signal.aborted) return done({ output: "Cancelled by the person before it ran.", isError: true });
-    if (!tool) return done({ output: `There is no tool called ${c.name}. Available: ${TOOLS.map((t) => t.spec.name).join(", ")}.`, isError: true });
+    if (!tool) return done({ output: `There is no tool called ${c.name}. Available: ${this.toolset.map((t) => t.spec.name).join(", ")}.`, isError: true });
     if (cutOff) return done({ output: "Your answer was cut off (output token limit), so this call didn't run. Do the work in smaller steps.", isError: true });
     if ("_raw" in input) return done({ output: "The arguments were not valid JSON, so this call didn't run.", isError: true });
-    const ctx = { cwd: this.data.cwd, signal, readFiles: this.readFiles };
-    if (tool.asks(this.data.mode) && !this.allowAlways.has(c.name)) {
-      let preview: Diff | null = null;
-      try {
-        preview = tool.preview?.(input, ctx) ?? null;
-      } catch {}
-      const d = await ui.ask(info, preview);
-      if (signal.aborted) return done({ output: "Cancelled by the person.", isError: true });
-      if (d === "deny") return done({ output: "The person declined this call. Don't retry it as is; ask them what they want or take another approach.", isError: true });
-      if (d === "always") this.allowAlways.add(c.name);
-    }
+    const ctx: ToolCtx = { cwd: this.data.cwd, signal, readFiles: this.readFiles, session: this, ui, callId: c.id };
+    const denied = await this.permit(tool, info, ctx, ui, signal);
+    if (denied) return done({ output: denied, isError: true });
     try {
       return done(await tool.run(input, ctx));
     } catch (err) {
       return done({ output: `Error: ${(err as Error)?.message ?? err}`, isError: true });
     }
+  }
+
+  /**
+   * Whether a call may run. Returns null to run it, or the message the model gets back.
+   * Read-only tools always run. Policies' "deny" wins in every mode; see PermissionPolicy.
+   */
+  private async permit(tool: Tool, info: ToolCallInfo, ctx: ToolCtx, ui: AgentUI, signal: AbortSignal): Promise<string | null> {
+    if (!tool.asks("ask")) return null;
+    const mode = this.data.mode;
+    let diff: Diff | null = null;
+    try {
+      diff = tool.preview?.(info.input, ctx) ?? null;
+    } catch {}
+    const verdicts: PermissionVerdict[] = [];
+    for (const p of getPermissionPolicies()) {
+      try {
+        const v = await p.decide({ session: this, call: info, tool, diff });
+        if (v) verdicts.push({ by: p.name, ...v });
+      } catch (e) {
+        verdicts.push({ decision: "ask", reason: `${p.name} failed: ${(e as Error)?.message ?? e}`, by: p.name });
+      }
+      if (signal.aborted) return "Cancelled by the person.";
+    }
+    const deny = verdicts.find((v) => v.decision === "deny");
+    if (deny) {
+      ui.notice?.(`Blocked ${info.title}${deny.reason ? `: ${deny.reason}` : ""}`, "warn");
+      return `This call was blocked${deny.by ? ` by ${deny.by}` : ""}${deny.reason ? `: ${deny.reason}` : ""}. Don't retry it; find a safer way or ask the person.`;
+    }
+    if (this.allowAlways.has(info.name) || mode === "yolo") return null;
+    if (mode === "ask" || mode === "edits") {
+      if (!tool.asks(mode)) return null;
+    } else if (mode === "auto") {
+      const asks = verdicts.find((v) => v.decision === "ask");
+      if (!asks && verdicts.some((v) => v.decision === "allow")) return null;
+      if (asks?.reason) info.reason = asks.reason;
+    }
+    const d = await ui.ask(info, diff);
+    if (signal.aborted) return "Cancelled by the person.";
+    if (d === "deny") return "The person declined this call. Don't retry it as is; ask them what they want or take another approach.";
+    if (d === "always") this.allowAlways.add(info.name);
+    return null;
   }
 
   /** Replace the history with a summary written by the model. */
@@ -225,7 +346,7 @@ export class Session {
         model: this.data.model,
         system: this.system,
         messages: [...this.data.messages, { role: "user", parts: [{ type: "text", text: COMPACT_PROMPT }] }],
-        tools: TOOLS.map((t) => t.spec),
+        tools: this.toolset.map((t) => t.spec),
         effort: "low",
         sessionId: this.id,
         signal,

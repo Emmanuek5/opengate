@@ -4,6 +4,8 @@ import { Session, type AgentUI, type ToolCallInfo } from "./agent";
 import { EFFORTS, loadConfig, MODES, VERSION, type Config, type Mode } from "./config";
 import { Gateway, groupModels, type GatewayModel } from "./gateway";
 import { listSessions, loadSession } from "./store";
+import { getCommand, getCommands } from "./ext";
+import "./features";
 import { toolByName, type Diff, type ToolResult } from "./tools";
 import type { Part } from "./types";
 
@@ -97,6 +99,7 @@ class AcpUI implements AgentUI {
   notice(message: string) {
     this.send({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: `\n_${message}_\n` } });
   }
+  event() {}
   usage(s: Session) {
     this.send({ sessionUpdate: "usage_update", used: s.data.contextUsed, size: s.contextSize });
   }
@@ -126,6 +129,14 @@ function replay(client: Client, s: Session) {
     }
   }
   return Promise.all(jobs);
+}
+
+/** MCP servers the client asked for, kept for the MCP feature (see ext.ts SessionHook). */
+export const ACP_MCP_SERVERS = "acp.mcpServers";
+
+function announceCommands(client: Client, s: Session) {
+  const availableCommands = [{ name: "compact", description: "Summarize the conversation to free up context" }, ...getCommands().map((c) => ({ name: c.name, description: c.description, ...(c.args ? { input: { hint: c.args } } : {}) }))];
+  void client.notify("session/update", { sessionId: s.id, update: { sessionUpdate: "available_commands_update", availableCommands } }).catch(() => {});
 }
 
 export function createAgent(opts: { config?: () => Config; gateway?: (cfg: Config) => Gateway } = {}) {
@@ -188,17 +199,21 @@ export function createAgent(opts: { config?: () => Config; gateway?: (cfg: Confi
       gateway();
       return {};
     })
-    .onRequest("session/new", async ({ params }) => {
+    .onRequest("session/new", async ({ params, client }) => {
       const { cfg, gw } = gateway();
       const list = await models(gw);
       const s = Session.create(gw, cfg, { cwd: params.cwd, model: pickModel(list, cfg.model) });
+      s.runtime.set(ACP_MCP_SERVERS, params.mcpServers ?? []);
       sessions.set(s.id, s);
       s.save();
+      setTimeout(() => announceCommands(client, s), 0);
       return { sessionId: s.id, modes: modeState(s.data.mode), configOptions: configOptions(list, s) };
     })
     .onRequest("session/load", async ({ params, client }) => {
       const { s, list } = await open(params.sessionId, params.cwd);
+      s.runtime.set(ACP_MCP_SERVERS, params.mcpServers ?? []);
       await replay(client, s);
+      announceCommands(client, s);
       return { modes: modeState(s.data.mode), configOptions: configOptions(list, s) };
     })
     .onRequest("session/list", ({ params }) => ({
@@ -226,6 +241,11 @@ export function createAgent(opts: { config?: () => Config; gateway?: (cfg: Confi
       const text = parts.length === 1 && parts[0].type === "text" ? parts[0].text.trim() : "";
       if (text === "/compact") {
         await s.compact(ui);
+        return { stopReason: "end_turn" };
+      }
+      const cmd = text.startsWith("/") ? getCommand(text.slice(1).split(/\s+/)[0]) : undefined;
+      if (cmd) {
+        await cmd.run({ session: s, args: text.slice(1 + cmd.name.length).trim(), ui, print: (t) => ui.text(t.endsWith("\n") ? t : t + "\n") });
         return { stopReason: "end_turn" };
       }
       const hadTitle = !!s.data.title;
