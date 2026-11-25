@@ -321,6 +321,7 @@ export class Session {
 
   private async loop(ui: AgentUI, signal: AbortSignal): Promise<StopReason> {
     let overflowRetried = false;
+    let dropped = 0;
     for (let step = 0; step < MAX_STEPS; step++) {
       if (signal.aborted) return "cancelled";
       await this.preparePrompt();
@@ -354,6 +355,7 @@ export class Session {
           },
         );
         if (first) recordSpeed(model, turn.usage.output, first - sent, Date.now() - first);
+        dropped = 0;
       } catch (err) {
         if (signal.aborted) {
           if (streamed) this.data.messages.push({ role: "assistant", parts: [{ type: "text", text: streamed + "\n\n[interrupted]" }], ts: Date.now() });
@@ -368,6 +370,15 @@ export class Session {
           if (limit) learnWindow(model, limit);
           ui.notice?.(`The conversation is too long for ${model}${limit ? ` (${limit} tokens)` : ""}; compacting and trying again.`, "warn");
           await this.compact(ui, signal, true);
+          step--;
+          continue;
+        }
+        // The connection dropped or the provider hiccuped: no tool has run for this step, so ask again.
+        if (isTransient(err, msg) && dropped < RETRY_DELAYS_MS.length) {
+          const wait = RETRY_DELAYS_MS[dropped++];
+          ui.notice?.(`The connection to ${model} broke${streamed ? " partway through its answer" : ""} (${msg.slice(0, 120)}); asking again in ${Math.round(wait / 1000)} s (try ${dropped} of ${RETRY_DELAYS_MS.length}).`, "warn");
+          await sleepUnless(wait, signal);
+          if (signal.aborted) return "cancelled";
           step--;
           continue;
         }
@@ -598,6 +609,33 @@ export function cleanTail(messages: Msg[], keep: number): Msg[] {
     if (m.role === "user" && m.parts.some((p) => p.type !== "tool_result")) return messages.slice(i);
   }
   return [];
+}
+
+/** Waits before asking the model again after a dropped connection (tests shorten these). */
+export const RETRY_DELAYS_MS = [2000, 5000, 15_000];
+
+/**
+ * Errors worth asking again for: the stream broke (the gateway reports "unexpected EOF", the
+ * socket closed, fetch failed) or the provider was briefly down or overloaded (500, 502-504, 529).
+ * Not 4xx: a bad request or a used-up quota won't fix itself in seconds.
+ */
+export function isTransient(err: unknown, msg = errorText(err)): boolean {
+  const status = Number((err as any)?.status ?? (err as any)?.response?.status);
+  if ([500, 502, 503, 504, 529].includes(status)) return true;
+  if (status >= 400 && status < 500) return false;
+  return /unexpected EOF|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|socket (hang up|connection was closed)|other side closed|premature close|terminated|fetch failed|network ?error|connection (error|reset|closed)|stream (ended|closed|error)|overloaded|bad gateway|service unavailable|gateway time-?out|internal server error/i.test(msg);
+}
+
+function sleepUnless(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((r) => {
+    const t = setTimeout(done, ms);
+    function done() {
+      clearTimeout(t);
+      signal.removeEventListener("abort", done);
+      r();
+    }
+    signal.addEventListener("abort", done, { once: true });
+  });
 }
 
 export function errorText(err: unknown): string {

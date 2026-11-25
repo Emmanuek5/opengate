@@ -14,7 +14,7 @@ const { toAnthropic } = await import("../src/llm/anthropic");
 const { toResponsesInput } = await import("../src/llm/responses");
 const { toChat } = await import("../src/llm/chat");
 const { applyEdit, applyEdits, toolByName, runProcess } = await import("../src/tools");
-const { untilStopped } = await import("../src/agent");
+const { untilStopped, isTransient, RETRY_DELAYS_MS } = await import("../src/agent");
 const { pairToolCalls, LOST_RESULT } = await import("../src/llm/util");
 const { parseArgs } = await import("../src/cli-args");
 const ext = await import("../src/ext");
@@ -309,6 +309,39 @@ describe("a stuck tool doesn't hold the turn", () => {
     expect(claude[2].content.map((b: any) => b.type)).toEqual(["tool_result", "tool_result", "text"]);
     expect(toChat("sys", msgs).filter((m: any) => m.role === "tool").map((m: any) => m.tool_call_id)).toEqual(["a", "b", "c"]);
     expect(toResponsesInput("gpt-6.2-sol", msgs).filter((m: any) => m.type === "function_call_output").map((m: any) => m.call_id)).toEqual(["a", "b", "c"]);
+  });
+});
+
+describe("a dropped connection", () => {
+  const fail = (message: string, status?: number) => () => {
+    throw Object.assign(new Error(message), status ? { status } : {});
+  };
+  const saved = [...RETRY_DELAYS_MS];
+
+  test("the step is asked again, a few times, with a notice", async () => {
+    RETRY_DELAYS_MS.splice(0, 3, 1, 1, 1);
+    try {
+      const llm = new FakeLlm([fail("unexpected EOF"), fail("Overloaded", 529), () => ({ parts: [{ type: "text", text: "done" }] })]);
+      const s = Session.create({ llm: () => llm }, {}, { cwd: dir, model: "m" });
+      const u = { ...ui(), notice: (t: string) => u.log.push(`notice:${t}`) };
+      expect(await s.prompt([{ type: "text", text: "go" }], u)).toBe("end_turn");
+      expect(llm.calls.length).toBe(3);
+      expect(u.log.filter((l: string) => l.startsWith("notice:") && l.includes("asking again")).length).toBe(2);
+      expect(s.data.messages.map((m: Msg) => m.role)).toEqual(["user", "assistant"]);
+
+      const gives = new FakeLlm([fail("unexpected EOF"), fail("unexpected EOF"), fail("unexpected EOF"), fail("unexpected EOF")]);
+      const s2 = Session.create({ llm: () => gives }, {}, { cwd: dir, model: "m" });
+      await expect(s2.prompt([{ type: "text", text: "go" }], ui())).rejects.toThrow("unexpected EOF");
+    } finally {
+      RETRY_DELAYS_MS.splice(0, 3, ...saved);
+    }
+  });
+
+  test("only for errors that can clear up on their own", () => {
+    for (const [m, st] of [["unexpected EOF"], ["socket hang up"], ["fetch failed"], ["Connection error."], ["x", 502], ["x", 529], ["The operation was terminated"]] as [string, number?][])
+      expect(isTransient(Object.assign(new Error(m), st ? { status: st } : {}))).toBe(true);
+    for (const [m, st] of [["prompt is too long", 400], ["internal server error", 401], ["Rate limited", 429], ["tool_use ids were found without tool_result"]] as [string, number?][])
+      expect(isTransient(Object.assign(new Error(m), st ? { status: st } : {}))).toBe(false);
   });
 });
 

@@ -292,7 +292,7 @@ describe("subagents", () => {
     const child = new FakeLlm([() => text(long)]);
     const broken = new FakeLlm([
       () => {
-        throw Object.assign(new Error("model overloaded"), { status: 529 });
+        throw Object.assign(new Error("model not supported"), { status: 400 });
       },
     ]);
     const parent = new FakeLlm([
@@ -311,7 +311,7 @@ describe("subagents", () => {
     expect(big.output).toContain("THE-END");
     expect(big.output.split("\n").at(-1)).toStartWith("[general agent · claude-haiku-5-5");
     expect(bad.isError).toBe(true);
-    expect(bad.output).toContain("model overloaded");
+    expect(bad.output).toContain("model not supported");
     expect(u.events.filter((e) => e.parentCallId === "p2").at(-1)).toMatchObject({ status: "failed" });
   });
 
