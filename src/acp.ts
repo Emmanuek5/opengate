@@ -2,10 +2,11 @@ import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import { Session, type AgentUI, type ToolCallInfo } from "./agent";
 import { EFFORTS, loadConfig, MODES, VERSION, type Config, type Mode, defaultModel } from "./config";
-import { Gateway, groupModels, type GatewayModel } from "./gateway";
-import { listSessions, loadSession } from "./store";
+import { Gateway, groupLabel, groupModels, modelLabel, type GatewayModel } from "./gateway";
+import { fullHistory, listSessions, loadSession } from "./store";
 import { getCommand, getCommands } from "./ext";
 import { surface } from "./llm/util";
+import { checkForUpdate } from "./update";
 import "./features";
 import { toolByName, type Diff, type ToolResult } from "./tools";
 import type { Part } from "./types";
@@ -29,7 +30,8 @@ export function configOptions(models: GatewayModel[], s: Session): acp.SessionCo
       name: "Model",
       category: "model",
       currentValue: s.data.model,
-      options: groupModels(ids).map((g) => ({ group: g.group, name: g.group, options: g.models.map((m) => ({ value: m, name: m })) })),
+      // Names, not ids, in the picker: "Claude Haiku 5.5" under "Anthropic API", not "anthropic/claude-haiku-5-5".
+      options: groupModels(ids).map((g) => ({ group: g.group, name: groupLabel(g.group), options: g.models.map((m) => ({ value: m, name: modelLabel(m), description: m })) })),
     },
     {
       type: "select",
@@ -166,7 +168,7 @@ function replay(client: Client, s: Session) {
   const send = (update: acp.SessionUpdate) => client.notify("session/update", { sessionId: s.id, update });
   const calls = new Map<string, { name: string; input: any }>();
   const jobs: Promise<void>[] = [];
-  for (const m of s.data.messages) {
+  for (const m of fullHistory(s.data)) {
     for (const p of m.parts) {
       if (m.role === "user" && p.type === "text") jobs.push(send({ sessionUpdate: "user_message_chunk", content: { type: "text", text: p.text } }));
       else if (p.type === "image") jobs.push(send({ sessionUpdate: "user_message_chunk", content: { type: "image", mimeType: p.mediaType, data: p.data } }));
@@ -194,6 +196,8 @@ function announceCommands(client: Client, s: Session) {
   const availableCommands = [{ name: "compact", description: "Summarize the conversation to free up context" }, ...getCommands().map((c) => ({ name: c.name, description: c.description, ...(c.args ? { input: { hint: c.args } } : {}) }))];
   void client.notify("session/update", { sessionId: s.id, update: { sessionUpdate: "available_commands_update", availableCommands } }).catch(() => {});
 }
+
+let updateNoticeSent = false;
 
 export function createAgent(opts: { config?: () => Config; gateway?: (cfg: Config) => Gateway } = {}) {
   const getConfig = opts.config ?? loadConfig;
@@ -265,6 +269,13 @@ export function createAgent(opts: { config?: () => Config; gateway?: (cfg: Confi
       sessions.set(s.id, s);
       s.save();
       setTimeout(() => announceCommands(client, s), 0);
+      // Once per process: tell the client about a newer release.
+      if (!updateNoticeSent) {
+        updateNoticeSent = true;
+        void checkForUpdate().then((newer) => {
+          if (newer) void client.notify("session/update", { sessionId: s.id, update: { sessionUpdate: "notice", severity: "info", title: `opengate ${newer} is available`, description: 'Run "opengate update" in a terminal; new sessions then use it.' } as any }).catch(() => {});
+        });
+      }
       return { sessionId: s.id, modes: modeState(s.data.mode), configOptions: configOptions(list, s) };
     })
     .onRequest("session/load", async ({ params, client }) => {

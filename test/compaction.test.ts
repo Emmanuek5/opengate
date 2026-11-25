@@ -80,3 +80,38 @@ test("the gateway's published windows are read in every common spelling and used
   expect(s.contextSize).toBe(1048576);
   expect(s.compactAt).toBe(Math.round(1048576 * 0.8));
 });
+
+test("compaction: Haiku summarizes, falls back to the session's model if it refuses; the old messages are archived", async () => {
+  const { fullHistory, loadSession } = await import("../src/store");
+  const asked: string[] = [];
+  const mk = (model: string): Llm => ({
+    async turn(req): Promise<LlmTurn> {
+      const last = req.messages.at(-1)!.parts[0] as any;
+      const compacting = last?.text?.startsWith("Summarize this conversation");
+      if (compacting) asked.push(model);
+      if (compacting && model === "claude-haiku-5-5") return { parts: [{ type: "text", text: "I can't help with that." }], native: null, stop: "refusal", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } };
+      if (compacting) return { parts: [{ type: "text", text: "SUMMARY BY OWN MODEL" }], native: null, stop: "end", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } };
+      return { parts: [{ type: "text", text: `answer from ${model}` }], native: null, stop: "end", usage: { input: 100, output: 5, cacheRead: 0, cacheWrite: 0 } };
+    },
+  });
+  const gw: any = { llm: (m: string) => mk(m), models: async () => [{ id: "unlid/x", ownedBy: null }, { id: "claude-haiku-5-5", ownedBy: null }], windowFor: () => undefined };
+  const s = Session.create(gw, {}, { cwd: process.env.OPENGATE_HOME!, model: "unlid/x" });
+  await s.prompt([{ type: "text", text: "first question" }], ui());
+  const u = ui();
+  await s.compact(u);
+  expect(asked).toEqual(["claude-haiku-5-5", "unlid/x"]);
+  expect(u.notices.some((n) => n.includes("Summary written by unlid/x"))).toBe(false); // own model: no note
+  expect((s.data.messages[0].parts[0] as any).text).toContain("SUMMARY BY OWN MODEL");
+  const saved = loadSession(s.id)!;
+  expect(saved.archived?.map((m) => m.role)).toEqual(["user", "assistant"]);
+  const all = fullHistory(saved).flatMap((m) => m.parts.map((p: any) => p.text));
+  expect(all).toContain("first question");
+  expect(all.some((t) => t?.includes("SUMMARY BY OWN MODEL"))).toBe(true);
+
+  // compactModel "same" never asks Haiku
+  asked.length = 0;
+  const s2 = Session.create(gw, { compactModel: "same" }, { cwd: process.env.OPENGATE_HOME!, model: "unlid/x" });
+  await s2.prompt([{ type: "text", text: "q" }], ui());
+  await s2.compact(ui());
+  expect(asked).toEqual(["unlid/x"]);
+});

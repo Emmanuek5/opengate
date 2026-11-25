@@ -97,6 +97,50 @@ export class Gateway {
   }
 }
 
+const BRANDS: Record<string, string> = {
+  claude: "Claude", gpt: "GPT", grok: "Grok", gemini: "Gemini", gemma: "Gemma", glm: "GLM", qwen: "Qwen", deepseek: "DeepSeek", kimi: "Kimi",
+  mimo: "MiMo", llama: "Llama", mistral: "Mistral", codex: "Codex", supergemma4: "SuperGemma 4", dolphin: "Dolphin", oss: "OSS", fable: "Fable", mythos: "Mythos",
+};
+const POOLS: Record<string, string> = { anthropic: "Anthropic API", openai: "OpenAI API", gemini: "Gemini API", openrouter: "OpenRouter", unlid: "Unlid", antigravity: "Antigravity", xai: "xAI" };
+
+/**
+ * A model id as a name for pickers: "claude-haiku-5-5" → "Claude Haiku 5.5",
+ * "anthropic/claude-haiku-5-5" → "Claude Haiku 5.5" (the pool shows as its group),
+ * "gpt-6.1-sol" → "GPT-6.1 Sol", "qwen3.8-27b-uncensored:thinking" → "Qwen3.8 27B Uncensored (thinking)".
+ */
+export function modelLabel(id: string): string {
+  let base = id.includes("/") ? id.slice(id.lastIndexOf("/") + 1) : id;
+  let variant = "";
+  const colon = base.indexOf(":");
+  if (colon > 0) {
+    variant = ` (${base.slice(colon + 1)})`;
+    base = base.slice(0, colon);
+  }
+  base = base.replace(/-\d{8}$/, ""); // date stamps
+  const parts = base.split("-");
+  const out: string[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const t = parts[i];
+    const low = t.toLowerCase();
+    if (/^\d+$/.test(t) && out.length && /\d$/.test(out[out.length - 1]) && !/\d{3,}/.test(t)) {
+      out[out.length - 1] += `.${t}`; // claude-opus-5-5 → Opus 5.5
+      continue;
+    }
+    if (low === "gpt" && parts[i + 1] && /^\d/.test(parts[i + 1])) {
+      out.push(`GPT-${parts[++i]}`);
+      continue;
+    }
+    if (BRANDS[low]) out.push(BRANDS[low]);
+    else if (/^\d+(\.\d+)?b$/i.test(t)) out.push(t.toUpperCase());
+    else if (/^[a-z]+\d/.test(low) && BRANDS[low.replace(/[\d.]+$/, "")]) out.push(BRANDS[low.replace(/[\d.]+$/, "")] + low.slice(low.replace(/[\d.]+$/, "").length));
+    else out.push(t.charAt(0).toUpperCase() + t.slice(1));
+  }
+  return out.join(" ") + variant;
+}
+
+/** A picker group's name: pools by their product name, subscription families as they are. */
+export const groupLabel = (group: string): string => POOLS[group.toLowerCase()] ?? group.charAt(0).toUpperCase() + group.slice(1);
+
 /** Group models for pickers: plain names are subscriptions, prefixed ones are pools ("openrouter/…"). */
 export function groupModels(models: GatewayModel[]): { group: string; models: string[] }[] {
   const groups = new Map<string, string[]>();

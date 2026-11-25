@@ -25,8 +25,14 @@ export interface SessionMeta {
 
 export interface SessionFile extends SessionMeta {
   version: 1;
+  /** what the model sees */
   messages: Msg[];
+  /** everything before the last compaction, oldest first; kept for transcripts, never sent to the model */
+  archived?: Msg[];
 }
+
+/** The whole conversation as it happened: archived (pre-compaction) messages, then the current ones. */
+export const fullHistory = (s: Pick<SessionFile, "messages" | "archived">): Msg[] => (s.archived?.length ? [...s.archived, ...s.messages] : s.messages);
 
 const dir = () => join(dataDir(), "sessions");
 const file = (id: string) => join(dir(), `${id.replace(/[^A-Za-z0-9_-]/g, "")}.json`);
@@ -41,8 +47,8 @@ export function newId(): string {
 const metaFile = (id: string) => join(dir(), `${id.replace(/[^A-Za-z0-9_-]/g, "")}.meta.json`);
 
 export function metaOf(s: SessionFile): SessionMeta {
-  const { messages, version: _v, ...meta } = s;
-  return { ...meta, messageCount: messages.length };
+  const { messages, archived, version: _v, ...meta } = s;
+  return { ...meta, messageCount: messages.length + (archived?.length ?? 0) };
 }
 
 export function saveSession(s: SessionFile): void {
@@ -139,7 +145,7 @@ export function searchSessions(text: string, limit = 30, opts: { all?: boolean; 
     if (!m || (opts.cwd && !opts.all && m.cwd !== opts.cwd)) continue;
     const s = loadSession(id);
     if (!s) continue;
-    for (const msg of s.messages) {
+    for (const msg of fullHistory(s)) {
       const hit = msg.parts.map((p) => (p.type === "text" || p.type === "thinking" ? p.text : p.type === "tool_result" ? p.output : "")).find((t) => t.toLowerCase().includes(needle));
       if (hit) {
         const i = hit.toLowerCase().indexOf(needle);

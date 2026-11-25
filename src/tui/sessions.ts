@@ -1,4 +1,4 @@
-import { listSessions, type ListOptions, type SessionFile, type SessionMeta } from "../store";
+import { fullHistory, listSessions, type ListOptions, type SessionFile, type SessionMeta } from "../store";
 import { markdownToAnsi } from "./markdown";
 import { ago, fg, G, P, st, stripAnsi, tilde } from "./theme";
 import { textWidth } from "./markdown";
@@ -100,18 +100,19 @@ function inputSummary(input: unknown): string {
 /** A read-only transcript of a session as ANSI lines wrapped to `width`. */
 export function transcriptLines(f: SessionFile, width: number): string[] {
   const out: string[] = [];
+  const history = fullHistory(f);
   const add = (l: string) => out.push(...wrapAnsi(l, width));
   add(st.bold(f.title ?? "(untitled)"));
-  add(fg(P.dim)(`${tilde(f.cwd)} · ${f.model} · ${fmtDate(f.updated)} · ${f.messages.length} messages${f.parentId ? ` · subagent of ${f.parentId}` : ""}`));
+  add(fg(P.dim)(`${tilde(f.cwd)} · ${f.model} · ${fmtDate(f.updated)} · ${history.length} messages${f.parentId ? ` · subagent of ${f.parentId}` : ""}`));
   const results = new Map<string, { output: string; isError?: boolean }>();
-  for (const m of f.messages) for (const p of m.parts) if (p.type === "tool_result") results.set(p.id, p);
+  for (const m of history) for (const p of m.parts) if (p.type === "tool_result") results.set(p.id, p);
   const result = (r: { output: string; isError?: boolean }) => {
     const lines = stripAnsi(r.output).replace(/\r/g, "").trim().split("\n");
     const color = r.isError ? fg(P.red) : fg(P.dim);
     lines.slice(0, 4).forEach((l, i) => add(color(`${i === 0 ? `  ${G.result} ` : "    "}${l}`)));
     if (lines.length > 4) add(fg(P.dim)(`    … +${lines.length - 4} lines`));
   };
-  for (const m of f.messages) {
+  for (const m of history) {
     let first = true;
     for (const p of m.parts) {
       if (p.type === "text" && p.text.trim()) {

@@ -420,10 +420,13 @@ describe("pickers", () => {
     const { type, frame, session } = setup();
     await ctlSubmit(type, "/model");
     await wait(60);
-    expect(frame()).toContain("claude-sonnet-5-5 ✓");
+    // names, with the exact id beside them
+    expect(frame()).toContain("Claude Sonnet 5.5");
+    expect(frame()).toContain("claude-sonnet-5-5");
+    expect(frame()).toMatch(/Claude Sonnet 5\.5.*✓/);
     await type("gpt");
-    expect(frame()).toContain("gpt-6");
-    expect(frame()).not.toContain("claude-haiku-5-5");
+    expect(frame()).toContain("GPT-6");
+    expect(frame()).not.toContain("Claude Haiku 5.5");
     await type("\r");
     await wait();
     expect(session.data.model).toBe("gpt-6");

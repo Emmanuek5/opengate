@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-export const VERSION = "0.3.0";
+export const VERSION = "0.3.1";
 
 const isWin = process.platform === "win32";
 const isMac = process.platform === "darwin";
@@ -46,6 +46,8 @@ export interface Config {
   guardModel?: string;
   /** look for a newer release once a day and mention it at start (default true) */
   updateCheck?: boolean;
+  /** the model that writes compaction summaries (default claude-haiku-5-5; falls back to the session's model if it refuses or fails); "same" always uses the session's model */
+  compactModel?: string;
   /** where to compact, in tokens, per model id (or "prefix*"); default 80% of the context window */
   autoCompact?: Record<string, number>;
   /** per-project defaults, keyed by the project root (the git root above the folder, else the folder) */

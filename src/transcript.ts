@@ -1,4 +1,4 @@
-import { listChildren, loadSession, type SessionFile } from "./store";
+import { fullHistory, listChildren, loadSession, type SessionFile } from "./store";
 import type { Part } from "./types";
 
 export interface TranscriptOptions {
@@ -45,7 +45,7 @@ export function renderTranscript(s: SessionFile, o: TranscriptOptions = {}, dept
   const childById = new Map(children.map((c) => [c.id, c]));
   const shown = new Set<string>();
 
-  for (const m of s.messages) {
+  for (const m of fullHistory(s)) {
     for (const p of m.parts as Part[]) {
       if (m.role === "user" && p.type === "text") lines.push(`**You:**`, "", p.text.trim(), "");
       else if (p.type === "image") lines.push(`_[image ${p.mediaType}]_`, "");

@@ -437,19 +437,46 @@ export class Session {
     return null;
   }
 
-  /** Replace the history with a summary written by the model. */
-  async compact(ui: AgentUI, signal?: AbortSignal, midTurn = false): Promise<void> {
-    if (this.data.messages.length < 2) return;
-    ui.notice?.("Compacting the conversation…", "info");
-    // If even the summary request is too long, summarize the most recent part: halve the history
-    // (starting at a clean user message) until it fits.
+  /**
+   * Write the summary. The compaction model (default claude-haiku-5-5: fast and cheap) goes
+   * first; if it refuses, fails, says nothing, or the conversation is too big for it, the
+   * session's own model writes it. `compactModel: "same"` always uses the session's model.
+   */
+  private async summarize(signal?: AbortSignal): Promise<{ summary: string; model: string }> {
+    const own = this.data.model;
+    const pick = this.cfg.compactModel === "same" ? own : (this.cfg.compactModel || "claude-haiku-5-5");
+    const candidates = [pick, own].filter((m, i, a) => a.indexOf(m) === i);
+    let lastError = "";
+    for (const model of candidates) {
+      if (model !== own) {
+        // Skip a model the gateway doesn't offer, or one whose window the conversation won't fit.
+        try {
+          const offered = await this.gateway.models?.();
+          if (offered?.length && !offered.some((m) => m.id === model)) continue;
+        } catch {}
+        const window = contextWindow(model, this.cfg, this.gateway.windowFor?.(model));
+        if (this.data.contextUsed > window * 0.9) continue;
+      }
+      try {
+        const summary = await this.summarizeWith(model, signal);
+        if (summary) return { summary, model };
+        lastError = `${model} returned no summary`;
+      } catch (e) {
+        if (signal?.aborted) throw e;
+        lastError = (e as Error).message;
+      }
+    }
+    throw new Error(`couldn't compact: ${lastError || "no model could write a summary"}`);
+  }
+
+  /** One model's summary; if the request is too long, summarize the most recent part (halving, at clean points). */
+  private async summarizeWith(model: string, signal?: AbortSignal): Promise<string> {
     let history = this.data.messages;
-    let turn;
     for (let attempt = 0; ; attempt++) {
       try {
-        turn = await this.llm().turn(
+        const turn = await this.gateway.llm(model).turn(
           {
-            model: this.data.model,
+            model,
             system: this.system,
             messages: [...history, { role: "user", parts: [{ type: "text", text: COMPACT_PROMPT }] }],
             tools: this.toolset.map((t) => t.spec),
@@ -460,19 +487,28 @@ export class Session {
           },
           { text: () => {}, thinking: () => {} },
         );
-        break;
+        if (turn.stop === "refusal") throw new Error(`${model} declined to summarize`);
+        return turn.parts.filter((p) => p.type === "text").map((p: any) => p.text).join("\n").trim();
       } catch (err) {
         const msg = errorText(err);
         const shorter = attempt < 5 && isContextOverflow(msg) ? cleanTail(history, Math.ceil(history.length / 2)) : null;
         if (!shorter || shorter.length >= history.length) throw new Error(msg);
         const limit = parseContextLimit(msg);
-        if (limit) learnWindow(this.data.model, limit);
+        if (limit) learnWindow(model, limit);
         history = shorter;
       }
     }
-    const summary = turn.parts.filter((p) => p.type === "text").map((p: any) => p.text).join("\n").trim();
-    if (!summary) throw new Error("compaction returned no summary");
+  }
+
+  /** Replace the history with a summary written by the model. */
+  async compact(ui: AgentUI, signal?: AbortSignal, midTurn = false): Promise<void> {
+    if (this.data.messages.length < 2) return;
+    ui.notice?.("Compacting the conversation…", "info");
+    const { summary, model: by } = await this.summarize(signal);
+    if (by !== this.data.model) ui.notice?.(`Summary written by ${by}.`, "info");
     const note = `This session was compacted. Summary of the conversation so far:\n\n${summary}${midTurn ? "\n\nContinue the task from where you left off." : ""}`;
+    // Keep what came before for transcripts and search; the model only gets the summary from here on.
+    this.data.archived = [...(this.data.archived ?? []), ...this.data.messages];
     this.data.messages = [{ role: "user", parts: [{ type: "text", text: note }], ts: Date.now() }];
     if (!midTurn) this.data.messages.push({ role: "assistant", parts: [{ type: "text", text: "Got it. I'll continue from this summary." }], ts: Date.now() });
     this.data.contextUsed = Math.ceil(note.length / 4);

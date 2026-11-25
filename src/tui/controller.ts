@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { Session, type AgentUI, type Decision, type ToolCallInfo } from "../agent";
 import { dataDir, defaultModel, EFFORTS, loadConfig, MODES, type Config, type Mode } from "../config";
 import { getCommand, getCommands, type AgentEvent } from "../ext";
-import { groupModels, type Gateway } from "../gateway";
+import { groupModels, type Gateway, groupLabel, modelLabel } from "../gateway";
 import { loadSession } from "../store";
 import { runProcess, shellCommand, type Diff, type ToolResult } from "../tools";
 import { FileIndex, fuzzyFilter, fuzzyScore, tokenAt } from "./complete";
@@ -14,7 +14,7 @@ import { stableCut } from "./markdown";
 import { listSessionsCompat, sessionRows, transcriptLines, wrapAnsi } from "./sessions";
 import { getLiveSubagent, liveSubagents, watchSubagent } from "../subagents";
 import { defaultModelCommand } from "../defaults";
-import { updateHint } from "../update";
+import { checkForUpdate, selfUpdate } from "../update";
 import { clipboardImage, imageFromFile, imagePathsIn, MAX_IMAGE_BYTES, MAX_IMAGES, type ImagePart } from "../images";
 import type { Part } from "../types";
 import { ago, fg, fmtDuration, fmtK, G, MODE_STYLE, P, st, stripAnsi } from "./theme";
@@ -129,6 +129,7 @@ export const BUILTIN: { name: string; args?: string; description: string }[] = [
   { name: "subagents", description: "Watch a subagent's chat live (Ctrl+T)" },
   { name: "compact", description: "Summarize the conversation to free up context" },
   { name: "usage", description: "Tokens used in this session" },
+  { name: "update", description: "Update opengate to the latest release (restart afterwards)" },
   { name: "help", description: "Commands and keys" },
   { name: "exit", description: "Quit" },
 ];
@@ -267,11 +268,10 @@ export class Controller implements AgentUI {
   // ----- lifecycle -----
   start() {
     this.push({ kind: "header" });
-    // At most once a day, in the background: mention a newer release.
-    try {
-      const newer = updateHint();
-      if (newer) this.push({ kind: "event", icon: "info", color: P.teal, text: `opengate ${newer} is available. Quit and run "opengate update".` });
-    } catch {}
+    // At most once a day, in the background: mention a newer release as soon as it's known.
+    void checkForUpdate().then((newer) => {
+      if (newer && !this.exiting) this.push({ kind: "event", icon: "info", color: P.teal, text: `opengate ${newer} is available · run /update (or "opengate update")` });
+    });
     if (this.s.data.messages.length) this.replay();
     void this.files.load().then(() => this.changed());
     if (this.o.initialPrompt) void this.submit(this.o.initialPrompt);
@@ -944,6 +944,16 @@ export class Controller implements AgentUI {
       case "subagents":
       case "watch":
         return this.watchSubagents();
+      case "update": {
+        this.notice("Checking for a newer opengate…");
+        try {
+          const r = await selfUpdate({ log: (t) => this.notice(t) });
+          if (r.status === "updated") return this.push({ kind: "event", icon: "ok", color: P.green, text: `Updated opengate ${r.from} → ${r.to}. Quit and start it again to use the new version.` });
+          return this.notice(r.status === "current" ? `You have the latest opengate (${r.from}).` : `You have ${r.from}, newer than the latest release (${r.to}).`);
+        } catch (e) {
+          return this.notice(`Couldn't update: ${(e as Error).message}`, "warn");
+        }
+      }
       case "sessions":
       case "resume": {
         if (arg) {
@@ -1160,7 +1170,7 @@ export class Controller implements AgentUI {
     const p = this.openPicker({ title, rows: [], loading: true, footer: scope ? undefined : "/model project · /model default to save a default", onPick: (r) => setModel(r.value) });
     try {
       const models = await this.o.gateway.models();
-      p.rows = groupModels(models).flatMap((g) => g.models.map((m) => ({ value: m, label: m, group: g.group, current: m === cur })));
+      p.rows = groupModels(models).flatMap((g) => g.models.map((m) => ({ value: m, label: modelLabel(m), detail: m, group: groupLabel(g.group), current: m === cur, search: `${m} ${modelLabel(m)} ${groupLabel(g.group)}` })));
       p.sel = Math.max(0, p.rows.findIndex((r) => r.current));
     } catch (e) {
       p.error = `Couldn't list models: ${(e as Error).message}`;

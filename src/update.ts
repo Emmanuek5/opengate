@@ -160,3 +160,26 @@ export function updateHint(fetchImpl: typeof fetch = fetch): string | null {
   }
   return state.latest && compareVersions(state.latest, VERSION) > 0 ? state.latest : null;
 }
+
+/**
+ * The newer version, if there is one: from the daily cache, or by asking GitHub when the cache is
+ * older than a day. Never throws; null when up to date, offline, disabled or running from source.
+ */
+export async function checkForUpdate(fetchImpl: typeof fetch = fetch): Promise<string | null> {
+  if (loadConfig().updateCheck === false || !isCompiledBinary()) return null;
+  let state: { at: number; latest: string } = { at: 0, latest: "" };
+  try {
+    state = JSON.parse(readFileSync(checkFile(), "utf8"));
+  } catch {}
+  if (Date.now() - state.at > 24 * 3600_000) {
+    try {
+      const r = await latestRelease(fetchImpl);
+      state = { at: Date.now(), latest: r.version };
+      mkdirSync(dataDir(), { recursive: true });
+      writeFileSync(checkFile(), JSON.stringify(state));
+    } catch {
+      return null;
+    }
+  }
+  return state.latest && compareVersions(state.latest, VERSION) > 0 ? state.latest : null;
+}
