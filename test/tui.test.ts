@@ -6,6 +6,8 @@ import { createElement } from "react";
 
 const home = mkdtempSync(join(tmpdir(), "og-tui-home-"));
 process.env.OPENGATE_HOME = home;
+// The UI falls back to ASCII glyphs in old Windows consoles; tests check the Unicode ones.
+process.env.WT_SESSION ??= "tests";
 
 const { render, cleanup } = await import("ink-testing-library");
 const { Session } = await import("../src/agent");

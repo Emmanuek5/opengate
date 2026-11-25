@@ -72,7 +72,8 @@ describe("locations", () => {
 
   test("slugs are readable, stable, filesystem-safe, and Windows paths fold case", () => {
     const a = mem.projectSlug("/home/me/My Project");
-    expect(a).toMatch(/^home-me-My-Project-[0-9a-f]{8}$/);
+    // Windows folds case (C:\\App and c:\\app are one folder); elsewhere case is kept.
+    expect(a).toMatch(process.platform === "win32" ? /^home-me-my-project-[0-9a-f]{8}$/ : /^home-me-My-Project-[0-9a-f]{8}$/);
     expect(mem.projectSlug("/home/me/My Project")).toBe(a);
     expect(mem.projectSlug("/home/me/My Project/")).toBe(a);
     expect(mem.projectSlug("/home/me/my-project")).not.toBe(a);

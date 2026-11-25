@@ -132,7 +132,7 @@ describe("mcp", () => {
     expect(by.good.status).toBe("connected");
     expect(by.crash.status).toBe("failed");
     expect(by.missing.status).toBe("failed");
-    expect(by.missing.error).toContain("not found");
+    expect(by.missing.error).toMatch(/not found|not recognized/);
     expect(u.events.find((e) => e.server === "crash")).toMatchObject({ type: "mcp", status: "failed" });
 
     let printed = "";

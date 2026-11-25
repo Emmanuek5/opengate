@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { relative } from "node:path";
+import { relative, isAbsolute } from "node:path";
 import { errorText } from "../agent";
 import type { PermissionRequest, PermissionVerdict } from "../ext";
 import { shellCommand, type Diff } from "../tools";
@@ -111,7 +111,12 @@ export function buildReview(req: PermissionRequest, nonce: string): string {
     L.push("command:", input.command);
     delete input.command;
   }
-  if (call.paths.length) L.push(`paths: ${call.paths.map((p) => `${p}${relative(cwd, p).startsWith("..") ? " (outside the project)" : ""}`).join(", ")}`);
+  // relative() gives an absolute path (not "..\\…") for another drive on Windows: that's outside too.
+  const outside = (p: string) => {
+    const r = relative(cwd, p);
+    return r.startsWith("..") || isAbsolute(r);
+  };
+  if (call.paths.length) L.push(`paths: ${call.paths.map((p) => `${p}${outside(p) ? " (outside the project)" : ""}`).join(", ")}`);
   if (diff) {
     for (const k of ["content", "old_string", "new_string"]) delete input?.[k];
     L.push("change:", diffText(diff));
