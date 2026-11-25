@@ -13,6 +13,14 @@ export interface Args {
   url?: string;
   key?: string;
   keyStdin?: boolean;
+  /** sessions: every folder */
+  all?: boolean;
+  /** sessions: include subagent sessions */
+  subagents?: boolean;
+  /** sessions export: md or json */
+  format?: "md" | "json";
+  /** sessions show/export: include the model's thinking */
+  thinking?: boolean;
 }
 
 export const COMMANDS = new Set(["acp", "login", "logout", "models", "sessions", "help", "version"]);
@@ -44,6 +52,14 @@ export function parseArgs(argv: string[]): Args {
     else if (x === "--url") a.url = val();
     else if (x === "--key") a.key = val();
     else if (x === "--key-stdin") a.keyStdin = true;
+    else if (x === "--all" || x === "-a") a.all = true;
+    else if (x === "--subagents") a.subagents = true;
+    else if (x === "--thinking") a.thinking = true;
+    else if (x === "--format") {
+      const f = val();
+      if (f !== "md" && f !== "json") throw new Error("--format must be md or json");
+      a.format = f;
+    }
     else if (x.startsWith("-") && x !== "-") throw new Error(`unknown option ${x}`);
     else if (!a.cmd && !a.rest.length && COMMANDS.has(x)) a.cmd = x;
     else a.rest.push(x);

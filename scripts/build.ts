@@ -13,6 +13,16 @@ for (const t of wanted) {
     entrypoints: ["src/cli.ts"],
     compile: { target: `bun-${t}` as any, outfile: out },
     minify: true,
+    // Ink loads React DevTools only when DEV is set and the package is installed: bundle a stub.
+    plugins: [
+      {
+        name: "no-react-devtools",
+        setup(b) {
+          b.onResolve({ filter: /^react-devtools-core$/ }, () => ({ path: "react-devtools-core", namespace: "stub" }));
+          b.onLoad({ filter: /.*/, namespace: "stub" }, () => ({ contents: "export default { initialize() {}, connectToDevTools() {} };", loader: "js" }));
+        },
+      },
+    ],
   });
   if (!r.success) {
     for (const l of r.logs) console.error(l);
