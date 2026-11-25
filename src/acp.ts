@@ -1,7 +1,7 @@
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import { Session, type AgentUI, type ToolCallInfo } from "./agent";
-import { EFFORTS, loadConfig, MODES, VERSION, type Config, type Mode } from "./config";
+import { EFFORTS, loadConfig, MODES, VERSION, type Config, type Mode, defaultModel } from "./config";
 import { Gateway, groupModels, type GatewayModel } from "./gateway";
 import { listSessions, loadSession } from "./store";
 import { getCommand, getCommands } from "./ext";
@@ -260,7 +260,7 @@ export function createAgent(opts: { config?: () => Config; gateway?: (cfg: Confi
     .onRequest("session/new", async ({ params, client }) => {
       const { cfg, gw } = gateway();
       const list = await models(gw);
-      const s = Session.create(gw, cfg, { cwd: params.cwd, model: pickModel(list, cfg.model) });
+      const s = Session.create(gw, cfg, { cwd: params.cwd, model: pickModel(list, defaultModel(cfg, params.cwd)) });
       s.runtime.set(ACP_MCP_SERVERS, params.mcpServers ?? []);
       sessions.set(s.id, s);
       s.save();

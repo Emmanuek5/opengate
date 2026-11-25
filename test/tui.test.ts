@@ -491,3 +491,36 @@ async function ctlSubmit(type: (s: string) => Promise<void>, text: string) {
   await type("\r");
   await wait(40);
 }
+
+describe("live subagent view", () => {
+  test("Ctrl+T opens a running subagent's chat, follows it, and Enter continues with it once done", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { ctl, frame, type, session } = setup([
+      () => ({ parts: [{ type: "tool_call", id: "a1", name: "agent", input: { description: "check things", prompt: "look around" } }] }),
+      () => ({ thinking: "pondering the layout", gate, parts: [{ type: "text", text: "child says hello" }] }),
+      () => ({ parts: [{ type: "text", text: "all done" }] }),
+    ]);
+    await type("delegate it");
+    await type("\r");
+    await until(() => ctl.tools.some((t) => t.subs.some((s) => s.status === "running")));
+    expect(frame()).toContain("ctrl+t to watch");
+    await type("\x14"); // Ctrl+T
+    await until(() => !!ctl.transcript?.live);
+    expect(frame()).toContain("Subagent");
+    expect(frame()).toContain("check things");
+    await until(() => frame().includes("pondering the layout"));
+    expect(frame()).toContain("live");
+    await type("\r");
+    expect(ctl.hint).toContain("Still working");
+    expect(ctl.transcript?.live).toBeTruthy();
+    release();
+    await until(() => ctl.transcript?.live?.status === "done");
+    await until(() => frame().includes("child says hello"));
+    await until(() => !ctl.busy);
+    const childId = ctl.transcript!.id;
+    await type("\r");
+    await until(() => ctl.s.id === childId);
+    expect(ctl.s.data.parentId).toBe(session.id);
+  });
+});

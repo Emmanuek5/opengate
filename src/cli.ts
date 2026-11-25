@@ -3,7 +3,7 @@ import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import type { Session } from "./agent";
-import { configPath, EFFORTS, loadConfig, normalizeUrl, saveConfig, VERSION, type Config } from "./config";
+import { configPath, EFFORTS, loadConfig, normalizeUrl, saveConfig, VERSION, type Config, defaultModel, setDefaultModel } from "./config";
 import { ago, c } from "./tui/theme";
 import { parseArgs, type Args } from "./cli-args";
 
@@ -21,6 +21,9 @@ Usage:
            [--url <url>] [--key-stdin]   or give the URL, and pipe the key in on stdin
   opengate logout                forget the saved key
   opengate models [filter]       list the models your key can use
+  opengate models default <id>   the model new sessions start with everywhere
+  opengate models project <id>   the model new sessions in this project start with ("none" clears)
+  opengate update [--check]      update opengate to the latest release
   opengate sessions [query]      sessions in this folder (--all: every folder, --subagents: include subagents)
   opengate sessions search <text>       search inside transcripts (--all for every folder)
   opengate sessions show <id>           print a session's transcript, with its subagents (--thinking)
@@ -152,6 +155,20 @@ async function sessionsCommand(a: Args, cwd: string) {
   console.log(c.dim(`\nResume with: opengate -r <id> · read with: opengate sessions show <id>`));
 }
 
+async function updateCommand(a: Args) {
+  const u = await import("./update");
+  if (a.check) {
+    const r = await u.latestRelease();
+    const cmp = u.compareVersions(VERSION, r.version);
+    return void console.log(cmp < 0 ? `opengate ${r.version} is available (you have ${VERSION}). Run ${c.bold("opengate update")}.` : `You have the latest opengate (${VERSION}).`);
+  }
+  const r = await u.selfUpdate({ force: a.force, log: (s) => console.log(c.dim(s)) });
+  if (r.status === "current") return void console.log(`Already on the latest opengate (${r.from}).`);
+  if (r.status === "newer-than-release") return void console.log(`You have ${r.from}, newer than the latest release (${r.to}). Use --force to install ${r.to} anyway.`);
+  console.log(`${c.green("✓")} Updated opengate ${r.from} → ${r.to} (${r.path}).`);
+  console.log(c.dim("Running sessions keep the old version until they're restarted; editors restart their ACP agent on the next session."));
+}
+
 async function main() {
   let a: Args;
   try {
@@ -162,6 +179,8 @@ async function main() {
   }
   if (a.cmd === "help") return void process.stdout.write(HELP);
   if (a.cmd === "version") return void console.log(VERSION);
+  (await import("./update")).cleanupOldBinary();
+  if (a.cmd === "update") return updateCommand(a);
   if (a.cmd === "acp") return (await import("./acp")).runAcp();
   if (a.cmd === "login") return login(a);
   if (a.cmd === "logout") {
@@ -184,11 +203,25 @@ async function main() {
   const gw = new Gateway(cfg.url, cfg.key);
 
   if (a.cmd === "models") {
+    const [first, ...more] = a.rest;
+    const scope = first === "default" || first === "global" ? "global" : first === "project" ? "project" : null;
+    if (scope) {
+      const want = more.join(" ").trim();
+      if (!want) throw new Error(`usage: opengate models ${first} <model id|none>`);
+      if (/^(none|clear|unset)$/i.test(want)) return void console.log(`Cleared the ${scope === "project" ? `default for ${setDefaultModel("project", null, cwd)}` : "global default"}.`);
+      const ids = (await gw.models(true)).map((m) => m.id);
+      const exact = ids.find((m) => m === want) ?? ids.find((m) => !m.includes("/") && (m === `claude-${want}` || m.endsWith(want)));
+      const hits = exact ? [exact] : ids.filter((m) => m.toLowerCase().includes(want.toLowerCase()));
+      if (hits.length !== 1) throw new Error(hits.length ? `several models match "${want}": ${hits.slice(0, 10).join(", ")}` : `no model matches "${want}"`);
+      const where = setDefaultModel(scope, hits[0], cwd);
+      return void console.log(`${c.green("✓")} Default model for ${where}: ${c.bold(hits[0])}`);
+    }
     const filter = a.rest.join(" ").toLowerCase();
+    const here = defaultModel(cfg, cwd);
     const list = (await gw.models(true)).filter((m) => !filter || m.id.toLowerCase().includes(filter));
     for (const g of groupModels(list)) {
       console.log(c.bold(g.group));
-      for (const m of g.models) console.log(`  ${m === cfg.model ? c.green(m + "  (default)") : m}`);
+      for (const m of g.models) console.log(`  ${m === here ? c.green(m + `  (default${here !== cfg.model ? " for this project" : ""})`) : m === cfg.model ? c.cyan(m + "  (global default)") : m}`);
     }
     return;
   }
@@ -202,7 +235,7 @@ async function main() {
     session = new Session(f, gw, cfg);
     if (a.model) session.setModel(a.model);
   } else {
-    let model = a.model ?? cfg.model;
+    let model = a.model ?? defaultModel(cfg, cwd);
     if (!model) model = await pickModel(await gw.models().catch(() => []));
     session = Session.create(gw, cfg, { cwd, model, mode: a.mode, effort: a.effort });
   }

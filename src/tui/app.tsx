@@ -162,6 +162,7 @@ function SubRow({ s, last, frame }: { s: SubView; last: boolean; frame: number }
       <Text>{s.title}</Text>
       {s.model ? <Text color={P.dim}> ({s.model})</Text> : null}
       {s.activity ? <Text color={P.gray}> · {s.activity}</Text> : s.status !== "running" ? <Text color={P.dim}> · {s.status}</Text> : null}
+      {s.status === "running" && last ? <Text color={P.dim}> · ctrl+t to watch</Text> : null}
     </Text>
   );
 }
@@ -607,10 +608,10 @@ function TranscriptView({ ctl }: { ctl: Controller }) {
   return (
     <Box borderStyle="round" borderColor={P.indigo} paddingX={1} flexDirection="column">
       <Text wrap="truncate-end">
-        <Text bold color={P.indigo}>
-          Transcript
+        <Text bold color={t.live ? P.amber : P.indigo}>
+          {t.live ? "Subagent" : "Transcript"}
         </Text>
-        <Text color={P.dim}> · read-only</Text>
+        <Text color={P.dim}>{t.live ? ` · ${t.title} · ${t.live.status === "running" ? (t.live.follow ? "live" : "live · paused (end to follow)") : t.live.status}` : " · read-only"}</Text>
       </Text>
       {shown.map((l, i) => (
         <Text key={t.offset + i} wrap="truncate-end">
@@ -618,7 +619,7 @@ function TranscriptView({ ctl }: { ctl: Controller }) {
         </Text>
       ))}
       <Text color={P.dim}>
-        {t.offset + 1}-{end} of {t.lines.length} · ↑↓ pgup/pgdn scroll · enter resume · esc back
+        {t.offset + 1}-{end} of {t.lines.length} · ↑↓ pgup/pgdn scroll{t.live ? " · end follow" : ""} · enter {t.live ? "keep chatting (when done)" : "resume"} · esc back
       </Text>
     </Box>
   );

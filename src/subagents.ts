@@ -95,6 +95,53 @@ const snippet = (text: string) => {
   return line.length > 120 ? `…${line.slice(-119)}` : line;
 };
 
+// ---------------- live subagents (for front ends that let you watch one) ----------------
+
+export interface LiveSubagent {
+  id: string;
+  parentId: string;
+  title: string;
+  agentType: string;
+  model: string;
+  started: number;
+  status: "running" | "done" | "failed" | "cancelled";
+  /** the child session: its messages so far */
+  session: Session;
+  /** the model's text and thinking for the step being streamed (not yet in session.data.messages) */
+  streaming: string;
+  thinking: string;
+  /** the tool running right now, if any */
+  tool: string | null;
+}
+
+const live = new Map<string, LiveSubagent>();
+const watchers = new Map<string, Set<() => void>>();
+const MAX_FINISHED = 30;
+
+function touch(id: string) {
+  for (const fn of watchers.get(id) ?? []) {
+    try {
+      fn();
+    } catch {}
+  }
+}
+
+/** Subagents started in this process (running ones first, then the most recent), optionally for one parent session. */
+export function liveSubagents(parentId?: string): LiveSubagent[] {
+  return [...live.values()]
+    .filter((l) => !parentId || l.parentId === parentId)
+    .sort((a, b) => Number(b.status === "running") - Number(a.status === "running") || b.started - a.started);
+}
+
+export const getLiveSubagent = (id: string): LiveSubagent | undefined => live.get(id);
+
+/** Call fn whenever the subagent streams text, starts or finishes a tool, or ends. Returns an unsubscribe function. */
+export function watchSubagent(id: string, fn: () => void): () => void {
+  if (!watchers.has(id)) watchers.set(id, new Set());
+  watchers.get(id)!.add(fn);
+  return () => watchers.get(id)?.delete(fn);
+}
+
 export interface SubagentInput {
   description?: string;
   prompt?: string;
@@ -144,32 +191,59 @@ export async function runSubagent(input: SubagentInput, ctx: ToolCtx, defs: Agen
   // Reuse the parent's MCP connections; the child's dispose leaves them open.
   shareMcp(parent, child);
 
+  const entry: LiveSubagent = { id: child.id, parentId: parent.id, title: description, agentType: def.name, model, started: Date.now(), status: "running", session: child, streaming: "", thinking: "", tool: null };
+  live.set(child.id, entry);
+  const finished = [...live.values()].filter((l) => l.status !== "running");
+  for (const old of finished.slice(0, Math.max(0, finished.length - MAX_FINISHED))) live.delete(old.id);
+
   const parentUi = ctx.ui;
   let steps = 0;
   let text = "";
   let lastText = 0;
-  const emit = (status: "running" | "done" | "failed" | "cancelled", activity?: string) =>
+  const emit = (status: "running" | "done" | "failed" | "cancelled", activity?: string) => {
+    entry.status = status;
+    if (status !== "running") {
+      entry.streaming = "";
+      entry.thinking = "";
+      entry.tool = null;
+    }
+    touch(child.id);
     parentUi?.event?.({ type: "subagent", id: child.id, parentCallId: ctx.callId, status, title: description, agentType: def.name, model, ...(activity ? { activity } : {}) });
+  };
 
   const childUi: AgentUI = {
     text(d) {
       text += d;
+      entry.streaming += d;
+      touch(child.id);
       const now = Date.now();
       if (now - lastText < 250) return;
       lastText = now;
       const s = snippet(text);
       if (s) emit("running", s);
     },
-    thinking() {},
+    thinking(d) {
+      entry.thinking += d;
+      touch(child.id);
+    },
     step() {
       steps++;
       text = "";
+      entry.streaming = "";
+      entry.thinking = "";
+      touch(child.id);
       child.data.mode = parent.data.mode; // follow the parent if the person changes mode mid-task
     },
     toolStart(c) {
+      entry.streaming = "";
+      entry.thinking = "";
+      entry.tool = c.title;
       emit("running", c.title);
     },
-    toolEnd() {},
+    toolEnd() {
+      entry.tool = null;
+      touch(child.id);
+    },
     async ask(c: ToolCallInfo, diff: Diff | null): Promise<Decision> {
       if (!parentUi || ctx.signal?.aborted) return "deny";
       if (parent.allowAlways.has(c.name)) return "once";

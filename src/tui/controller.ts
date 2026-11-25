@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Session, type AgentUI, type Decision, type ToolCallInfo } from "../agent";
-import { dataDir, EFFORTS, MODES, type Config, type Mode } from "../config";
+import { dataDir, defaultModel, EFFORTS, loadConfig, MODES, type Config, type Mode } from "../config";
 import { getCommand, getCommands, type AgentEvent } from "../ext";
 import { groupModels, type Gateway } from "../gateway";
 import { loadSession } from "../store";
@@ -11,8 +11,11 @@ import * as E from "./editor";
 import { summarizeTool, type ToolSummary } from "./format";
 import { isNewlineKey, type KeyEvent } from "./keys";
 import { stableCut } from "./markdown";
-import { listSessionsCompat, sessionRows, transcriptLines } from "./sessions";
-import { fmtDuration, fmtK, MODE_STYLE, P, st, stripAnsi } from "./theme";
+import { listSessionsCompat, sessionRows, transcriptLines, wrapAnsi } from "./sessions";
+import { getLiveSubagent, liveSubagents, watchSubagent } from "../subagents";
+import { defaultModelCommand } from "../defaults";
+import { updateHint } from "../update";
+import { ago, fg, fmtDuration, fmtK, G, MODE_STYLE, P, st, stripAnsi } from "./theme";
 
 // ---------------- state shapes ----------------
 
@@ -91,6 +94,8 @@ export interface TranscriptState {
   offset: number;
   /** the picker to go back to */
   back: PickerState | null;
+  /** watching a running subagent: the view follows its new output until you scroll up */
+  live?: { follow: boolean; status: string; unsub: () => void };
 }
 
 export interface PopupItem {
@@ -113,12 +118,13 @@ interface Expandable {
 }
 
 export const BUILTIN: { name: string; args?: string; description: string }[] = [
-  { name: "model", args: "[name]", description: "Pick a model" },
+  { name: "model", args: "[default|project] [name]", description: "Pick this session's model, or the default for this project / everywhere" },
   { name: "mode", args: "[ask|edits|auto|yolo]", description: "When to ask before edits and commands" },
   { name: "effort", args: `[${EFFORTS.join("|")}]`, description: "How hard the model thinks" },
   { name: "new", description: "Start a new session" },
   { name: "resume", args: "[n|id]", description: "Continue an earlier session" },
   { name: "sessions", description: "Pick from recent sessions in this folder" },
+  { name: "subagents", description: "Watch a subagent's chat live (Ctrl+T)" },
   { name: "compact", description: "Summarize the conversation to free up context" },
   { name: "usage", description: "Tokens used in this session" },
   { name: "help", description: "Commands and keys" },
@@ -126,7 +132,7 @@ export const BUILTIN: { name: string; args?: string; description: string }[] = [
 ];
 
 /** Commands that make sense while a turn runs; the rest wait in the queue. */
-const RUN_WHILE_BUSY = new Set(["help", "?", "usage", "mode", "effort", "model", "models", "exit", "quit"]);
+const RUN_WHILE_BUSY = new Set(["help", "?", "usage", "mode", "effort", "model", "models", "exit", "quit", "subagents", "watch"]);
 
 export const KEYS: [string, string][] = [
   ["Enter", "send (queued while the agent works)"],
@@ -136,6 +142,7 @@ export const KEYS: [string, string][] = [
   ["Shift+Tab", "cycle mode: ask → auto-edit → auto → full-auto"],
   ["Esc", "interrupt the agent · close a popup"],
   ["Ctrl+O", "expand the last collapsed output"],
+  ["Ctrl+T", "watch a subagent's chat live"],
   ["Ctrl+C", "clear the input · twice to quit"],
   ["Ctrl+D", "quit (on an empty input)"],
   ["!command", "run a shell command directly"],
@@ -252,6 +259,11 @@ export class Controller implements AgentUI {
   // ----- lifecycle -----
   start() {
     this.push({ kind: "header" });
+    // At most once a day, in the background: mention a newer release.
+    try {
+      const newer = updateHint();
+      if (newer) this.push({ kind: "event", icon: "info", color: P.teal, text: `opengate ${newer} is available. Quit and run "opengate update".` });
+    } catch {}
     if (this.s.data.messages.length) this.replay();
     void this.files.load().then(() => this.changed());
     if (this.o.initialPrompt) void this.submit(this.o.initialPrompt);
@@ -474,6 +486,7 @@ export class Controller implements AgentUI {
     }
     if (k.name === "tab" && k.shift) return this.cycleMode();
     if (k.ctrl && k.name === "o") return this.expand();
+    if (k.ctrl && k.name === "t") return this.watchSubagents();
 
     const popup = this.popup();
     if (k.name === "escape") {
@@ -863,6 +876,9 @@ export class Controller implements AgentUI {
       case "new":
         this.switchSession(Session.create(this.o.gateway, this.o.cfg, { cwd: this.s.data.cwd, model: this.s.data.model, mode: this.s.data.mode, effort: this.s.data.effort }));
         return this.notice("New session.");
+      case "subagents":
+      case "watch":
+        return this.watchSubagents();
       case "sessions":
       case "resume": {
         if (arg) {
@@ -946,6 +962,56 @@ export class Controller implements AgentUI {
     this.changed(true);
   }
 
+  /** Subagents of this session: open the running one, or pick among several. */
+  watchSubagents() {
+    const list = liveSubagents(this.s.id);
+    if (!list.length) return this.notice("No subagents in this session yet. Saved ones from earlier are under /resume.");
+    const running = list.filter((l) => l.status === "running");
+    if (list.length === 1 || running.length === 1) return this.openLive((running[0] ?? list[0]).id, null);
+    const p = this.openPicker({
+      title: "Subagents",
+      rows: list.map((l) => ({ value: l.id, label: l.title, detail: `${l.agentType} · ${l.model} · ${l.status === "running" ? "running" : l.status} · ${ago(l.started)}` })),
+      footer: "enter watch",
+      onPick: (r) => this.openLive(r.value, p),
+    });
+  }
+
+  /** A subagent's chat that keeps updating while it works. */
+  openLive(id: string, back: PickerState | null) {
+    const entry = getLiveSubagent(id);
+    if (!entry) return this.openTranscript(id, back);
+    const width = () => Math.max(this.size.cols - 4, 20);
+    const build = (): string[] => {
+      const lines = transcriptLines(entry.session.data, width());
+      if (entry.thinking.trim()) for (const l of entry.thinking.trim().split("\n").slice(-3)) lines.push(...wrapAnsi(st.italic(fg(P.dim)(`${G.think} ${l}`)), width()));
+      if (entry.streaming.trim()) for (const l of entry.streaming.trim().split("\n")) lines.push(...wrapAnsi(l, width()));
+      if (entry.tool) lines.push(fg(P.amber)(`${G.dot} ${entry.tool}…`));
+      const state = entry.status === "running" ? fg(P.amber)("working…") : entry.status === "done" ? fg(P.green)("finished · enter to keep chatting with it") : fg(P.red)(entry.status);
+      lines.push("", `${fg(P.dim)(`${entry.agentType} · ${entry.model} ·`)} ${state}`);
+      return lines;
+    };
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const refresh = () => {
+      const t = this.transcript;
+      if (!t || t.id !== id || !t.live) return;
+      t.lines = build();
+      t.live.status = entry.status;
+      if (t.live.follow) t.offset = Math.max(0, t.lines.length - this.transcriptHeight());
+      this.changed();
+    };
+    const unsub = watchSubagent(id, () => {
+      if (timer) return;
+      timer = setTimeout(() => {
+        timer = null;
+        refresh();
+      }, 80);
+    });
+    const lines = build();
+    this.transcript = { id, title: entry.title, lines, offset: Math.max(0, lines.length - this.transcriptHeight()), back, live: { follow: true, status: entry.status, unsub } };
+    this.picker = null;
+    this.changed(true);
+  }
+
   /** Rows the transcript view shows at once. */
   transcriptHeight() {
     return Math.max(5, this.size.rows - 5);
@@ -956,15 +1022,29 @@ export class Controller implements AgentUI {
     const h = this.transcriptHeight();
     const max = Math.max(0, t.lines.length - h);
     const ch = k.name === "char" ? k.ch : "";
-    if (k.name === "escape" || k.name === "left" || ch === "q" || (k.ctrl && k.name === "c")) {
+    if (k.name === "escape" || k.name === "left" || ch === "q" || (k.ctrl && k.name === "c") || (t.live && k.ctrl && k.name === "t")) {
+      t.live?.unsub();
       this.transcript = null;
       this.picker = k.ctrl ? null : t.back;
       return this.changed(true);
     }
     if (k.name === "return") {
+      if (t.live && t.live.status === "running") {
+        this.hint = "Still working. Enter continues the chat once it has finished.";
+        return this.changed(true);
+      }
+      if (this.busy && t.live) {
+        this.hint = "The main session is still working; stop it (Esc) or wait, then continue with the subagent.";
+        return this.changed(true);
+      }
+      t.live?.unsub();
       this.transcript = null;
       this.resume(t.id);
       return this.changed(true);
+    }
+    if (t.live) {
+      if (["up", "pageup", "home"].includes(k.name) || ["k", "b", "g"].includes(ch)) t.live.follow = false;
+      if (k.name === "end" || ch === "G") t.live.follow = true;
     }
     if (k.name === "up" || ch === "k") t.offset--;
     else if (k.name === "down" || ch === "j") t.offset++;
@@ -983,7 +1063,13 @@ export class Controller implements AgentUI {
   }
 
   private async modelCommand(arg: string) {
+    // "/model default …" and "/model project …" set what new sessions start with.
+    const scoped = /^(default|global|project)\b\s*(.*)$/i.exec(arg);
+    const scope = scoped ? (scoped[1].toLowerCase() === "project" ? "project" : "global") : null;
+    const saveDefault = (m: string) => defaultModelCommand({ session: this.s, args: `${scope} ${m}`, ui: this, print: (t) => this.print(t) });
+    if (scoped) arg = scoped[2].trim();
     const setModel = (m: string) => {
+      if (scope) return void saveDefault(m);
       this.s.setModel(m);
       this.notice(`Model: ${m}`);
     };
@@ -1004,8 +1090,9 @@ export class Controller implements AgentUI {
       void p;
       return;
     }
-    const cur = this.s.data.model;
-    const p = this.openPicker({ title: "Model", rows: [], loading: true, onPick: (r) => setModel(r.value) });
+    const cur = scope === "project" ? (defaultModel(this.o.cfg, this.s.data.cwd) ?? this.s.data.model) : scope === "global" ? (loadConfig().model ?? this.s.data.model) : this.s.data.model;
+    const title = scope === "project" ? "Default model for this project" : scope === "global" ? "Default model everywhere" : "Model";
+    const p = this.openPicker({ title, rows: [], loading: true, footer: scope ? undefined : "/model project · /model default to save a default", onPick: (r) => setModel(r.value) });
     try {
       const models = await this.o.gateway.models();
       p.rows = groupModels(models).flatMap((g) => g.models.map((m) => ({ value: m, label: m, group: g.group, current: m === cur })));

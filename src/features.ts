@@ -5,3 +5,4 @@ import "./subagents";
 import "./skills";
 import "./mcp";
 import "./guard";
+import "./defaults";

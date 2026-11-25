@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 export const VERSION = "0.2.1";
 
@@ -44,6 +44,10 @@ export interface Config {
   cacheTtl?: "5m" | "1h";
   /** the model that reviews actions in auto mode (default claude-haiku-5-5) */
   guardModel?: string;
+  /** look for a newer release once a day and mention it at start (default true) */
+  updateCheck?: boolean;
+  /** per-project defaults, keyed by the project root (the git root above the folder, else the folder) */
+  projects?: Record<string, { model?: string }>;
   /** the safety guard (built-in blocks, auto-mode review); false turns it off by default (your permissions rules still apply) */
   guard?: boolean;
   /** context window per model id (or prefix ending in *), for compaction */
@@ -104,4 +108,50 @@ export function normalizeUrl(u: string): string {
   let s = u.trim().replace(/\/+$/, "");
   if (!/^https?:\/\//i.test(s)) s = `https://${s}`;
   return s.replace(/\/v1$/, "");
+}
+
+// ---------------- default models ----------------
+
+/** The project a folder belongs to: the nearest folder above it with a .git, else the folder itself. */
+export function projectRoot(cwd: string): string {
+  let d = resolve(cwd);
+  for (let i = 0; i < 60; i++) {
+    if (existsSync(join(d, ".git"))) return d;
+    const up = dirname(d);
+    if (up === d) break;
+    d = up;
+  }
+  return resolve(cwd);
+}
+
+/** Key for `projects` in the config: Windows paths fold case. */
+export const projectKey = (cwd: string) => {
+  const r = projectRoot(cwd);
+  return isWin ? r.toLowerCase() : r;
+};
+
+/** The model a new session in this folder starts with: the project's default, else the global one. */
+export function defaultModel(cfg: Config, cwd: string): string | undefined {
+  return cfg.projects?.[projectKey(cwd)]?.model || cfg.model || undefined;
+}
+
+/** Save the default model for every project ("global") or for the folder's project. Returns where it applies. */
+export function setDefaultModel(scope: "global" | "project", model: string | null, cwd: string): string {
+  if (scope === "global") {
+    saveConfig({ model: model ?? undefined });
+    return "every project without its own default";
+  }
+  let file: Config = {};
+  try {
+    if (existsSync(configPath())) file = JSON.parse(readFileSync(configPath(), "utf8"));
+  } catch {}
+  const projects = { ...(file.projects ?? {}) };
+  const key = projectKey(cwd);
+  if (model) projects[key] = { ...projects[key], model };
+  else if (projects[key]) {
+    delete projects[key].model;
+    if (!Object.keys(projects[key]).length) delete projects[key];
+  }
+  saveConfig({ projects });
+  return projectRoot(cwd);
 }

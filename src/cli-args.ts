@@ -21,9 +21,13 @@ export interface Args {
   format?: "md" | "json";
   /** sessions show/export: include the model's thinking */
   thinking?: boolean;
+  /** update: only report whether a newer version exists */
+  check?: boolean;
+  /** update: reinstall even if already on the latest */
+  force?: boolean;
 }
 
-export const COMMANDS = new Set(["acp", "login", "logout", "models", "sessions", "help", "version"]);
+export const COMMANDS = new Set(["acp", "login", "logout", "models", "sessions", "update", "help", "version"]);
 
 export function parseArgs(argv: string[]): Args {
   const a: Args = { cmd: null, rest: [] };
@@ -55,6 +59,8 @@ export function parseArgs(argv: string[]): Args {
     else if (x === "--all" || x === "-a") a.all = true;
     else if (x === "--subagents") a.subagents = true;
     else if (x === "--thinking") a.thinking = true;
+    else if (x === "--check") a.check = true;
+    else if (x === "--force") a.force = true;
     else if (x === "--format") {
       const f = val();
       if (f !== "md" && f !== "json") throw new Error("--format must be md or json");
