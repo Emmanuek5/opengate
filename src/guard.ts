@@ -2,7 +2,7 @@ import type { ToolCallInfo } from "./agent";
 import type { Mode } from "./config";
 import { registerCommand, registerPermissionPolicy, type CommandIO, type PermissionPolicy, type PermissionRequest, type PermissionVerdict } from "./ext";
 import { HARD_BLOCKS, hardBlock, safeCommand, safeEdit } from "./guard/blocks";
-import { DEFAULT_GUARD_MODEL, reviewWithModel } from "./guard/model";
+import { guardModelFor, reviewWithModel } from "./guard/model";
 import { matchRules, type Subject } from "./guard/rules";
 import { toolByName, type Tool } from "./tools";
 
@@ -21,7 +21,7 @@ import { toolByName, type Tool } from "./tools";
  */
 
 export { HARD_BLOCKS, hardBlock, safeCommand, safeEdit } from "./guard/blocks";
-export { parseGuardReply, guardSettings, buildReview, DEFAULT_GUARD_MODEL } from "./guard/model";
+export { parseGuardReply, guardSettings, buildReview, DEFAULT_GUARD_MODEL, guardModelFor } from "./guard/model";
 export { matchRules } from "./guard/rules";
 
 export type Stage = "deny-rule" | "allow-rule" | "hard-block" | "fast-path" | "model" | "off" | "none";
@@ -144,7 +144,7 @@ function effect(r: GuardResult, mode: Mode): string {
 
 async function guardCommand({ session, args, print }: CommandIO): Promise<void> {
   const mode = session.data.mode;
-  const model = session.cfg.guardModel || DEFAULT_GUARD_MODEL;
+  const model = await guardModelFor(session);
   const sw = /^(on|off)$/i.exec(args.trim());
   if (sw) {
     const on = sw[1].toLowerCase() === "on";

@@ -13,7 +13,7 @@ const { apiFor } = await import("../src/gateway");
 const { toAnthropic } = await import("../src/llm/anthropic");
 const { toResponsesInput } = await import("../src/llm/responses");
 const { toChat } = await import("../src/llm/chat");
-const { applyEdit, toolByName } = await import("../src/tools");
+const { applyEdit, applyEdits, toolByName } = await import("../src/tools");
 const { parseArgs } = await import("../src/cli-args");
 const ext = await import("../src/ext");
 import type { Llm, LlmRequest, LlmTurn, Msg } from "../src/types";
@@ -60,6 +60,24 @@ describe("tools", () => {
     expect(applyEdit("x x", "x", "y", false)).toContain("appears 2 times");
     expect(applyEdit("x x", "x", "y", true)).toEqual({ text: "y y", count: 2 });
     expect(applyEdit("abc", "zzz", "y", false)).toContain("not found");
+  });
+
+  test("several edits in one call apply in order, all or nothing", async () => {
+    expect(applyEdits("a b c", [{ old_string: "a", new_string: "A" }, { old_string: "A b", new_string: "AB" }])).toEqual({ text: "AB c", count: 2 });
+    expect(applyEdits("a b c", [{ old_string: "a", new_string: "A" }, { old_string: "zzz", new_string: "y" }])).toBe(
+      "Edit 2 of 2: old_string was not found in the file. Read the file again and copy the exact text, including whitespace. No edits were made.",
+    );
+    const f = join(dir, "multi.txt");
+    writeFileSync(f, "one\ntwo\nthree\n");
+    const edit = toolByName.get("edit_file")!;
+    const readFiles = new Map<string, number>();
+    await toolByName.get("read_file")!.run({ path: f }, { cwd: dir, readFiles } as any);
+    const bad = await edit.run({ path: f, edits: [{ old_string: "one", new_string: "1" }, { old_string: "four", new_string: "4" }] }, { cwd: dir, readFiles } as any);
+    expect(bad.isError).toBe(true);
+    expect(readFileSync(f, "utf8")).toBe("one\ntwo\nthree\n"); // untouched
+    const ok = await edit.run({ path: f, edits: [{ old_string: "one", new_string: "1" }, { old_string: "three", new_string: "3" }] }, { cwd: dir, readFiles } as any);
+    expect(ok.isError).toBeFalsy();
+    expect(readFileSync(f, "utf8")).toBe("1\ntwo\n3\n");
   });
 
   test("files must be read before they're edited, and re-read after outside changes", async () => {

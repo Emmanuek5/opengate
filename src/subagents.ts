@@ -5,6 +5,7 @@ import { registerCommand, registerToolProvider } from "./ext";
 import { agentDirs, loadAgentDefs, type AgentDef } from "./subagents/defs";
 import type { Diff, Tool, ToolCtx, ToolResult } from "./tools";
 import type { Part } from "./types";
+import { familyOf, fastestModel, isTier, pickTier, speedLabel, tierOf, tierPicks, TIER_USE, TIERS } from "./models";
 
 export { loadAgentDefs, type AgentDef } from "./subagents/defs";
 
@@ -21,15 +22,27 @@ export const MAX_RESULT = 20_000;
 const ACP_MCP_SERVERS = "acp.mcpServers";
 const ASK_QUEUE = "subagents.askQueue";
 
-export function resolveModel(m: string | undefined | null): string | undefined {
+/** Model names that pick from the gateway's list: the four sizes, plus the quickest small model. */
+export const MODEL_PICKS = ["fastest", "small", "medium", "large", "frontier"] as const;
+
+/**
+ * A model id from what an agent or a config asked for: an alias (opus / sonnet / haiku), a pick
+ * ("fastest", or a size: "small" … "frontier"; needs the gateway's model list, and prefers the
+ * session's family), or an id as given. Undefined for nothing / "inherit" / a pick with no match.
+ */
+export function resolveModel(m: string | undefined | null, ids: string[] = [], preferFamily?: string | null): string | undefined {
   const s = typeof m === "string" ? m.trim() : "";
   if (!s || s.toLowerCase() === "inherit") return undefined;
-  return MODEL_ALIASES[s.toLowerCase()] ?? s;
+  const k = s.toLowerCase();
+  if (k === "fastest" || k === "fast") return fastestModel(ids, preferFamily);
+  if (isTier(k)) return pickTier(ids, k, preferFamily);
+  return MODEL_ALIASES[k] ?? s;
 }
 
 /** The model a subagent runs on: asked for > config per type > the type's own > the parent's. */
-export function modelFor(def: AgentDef, asked: string | undefined, cfg: Config, parentModel: string): string {
-  return resolveModel(asked) ?? resolveModel(cfg.subagentModels?.[def.name]) ?? resolveModel(def.model) ?? parentModel;
+export function modelFor(def: AgentDef, asked: string | undefined, cfg: Config, parentModel: string, ids: string[] = []): string {
+  const fam = familyOf(parentModel);
+  return resolveModel(asked, ids, fam) ?? resolveModel(cfg.subagentModels?.[def.name], ids, fam) ?? resolveModel(def.model, ids, fam) ?? parentModel;
 }
 
 const SUBAGENT_PROMPT = `You are running as a subagent: another agent started you for one task, given in the first message. You don't see its conversation, and the person won't read your messages directly.
@@ -160,17 +173,16 @@ export async function runSubagent(input: SubagentInput, ctx: ToolCtx, defs: Agen
   const typeName = (typeof input.agent_type === "string" && input.agent_type.trim()) || "general";
   const def = defs.find((d) => d.name === typeName) ?? defs.find((d) => d.name.toLowerCase() === typeName.toLowerCase());
   if (!def) return { output: `There is no agent type "${typeName}". Available: ${defs.map((d) => d.name).join(", ")}.`, isError: true };
-  const model = modelFor(def, input.model, parent.cfg, parent.data.model);
+  let ids: string[] = [];
+  try {
+    ids = ((await parent.gateway.models?.()) ?? []).map((m) => m.id);
+  } catch {}
+  const model = modelFor(def, input.model, parent.cfg, parent.data.model, ids);
 
   // An explicitly asked-for model must exist on the gateway (when the gateway can tell us).
-  if (resolveModel(input.model) && parent.gateway.models) {
-    try {
-      const ids = (await parent.gateway.models()).map((m) => m.id);
-      if (ids.length && !ids.includes(model)) {
-        const near = ids.filter((id) => id.toLowerCase().includes(String(input.model).toLowerCase())).slice(0, 8);
-        return { output: `The gateway has no model "${model}".${near.length ? ` Similar: ${near.join(", ")}.` : ""} Leave model out to use the default.`, isError: true };
-      }
-    } catch {}
+  if (resolveModel(input.model, ids, familyOf(parent.data.model)) && ids.length && !ids.includes(model)) {
+    const near = ids.filter((id) => id.toLowerCase().includes(String(input.model).toLowerCase())).slice(0, 8);
+    return { output: `The gateway has no model "${model}".${near.length ? ` Similar: ${near.join(", ")}.` : ""} Leave model out to use the default.`, isError: true };
   }
   if (ctx.signal?.aborted) return { output: "Cancelled before the subagent started.", isError: true };
 
@@ -294,34 +306,60 @@ export async function runSubagent(input: SubagentInput, ctx: ToolCtx, defs: Agen
   }
 }
 
-function describeTypes(defs: AgentDef[], cfg: Config): string {
+function describeTypes(defs: AgentDef[], cfg: Config, ids: string[] = [], current = ""): string {
   return defs
     .map((d) => {
-      const m = resolveModel(cfg.subagentModels?.[d.name]) ?? resolveModel(d.model);
-      const extra = [d.tools ? `tools: ${d.tools.join(", ")}` : "", m ? `model: ${m}` : ""].filter(Boolean).join("; ");
+      const asked = cfg.subagentModels?.[d.name] ?? d.model;
+      const m = resolveModel(asked, ids, familyOf(current));
+      const shown = m && asked && m !== asked.trim() ? `${asked.trim()}, now ${m}` : m;
+      const extra = [d.tools ? `tools: ${d.tools.join(", ")}` : "", shown ? `default model: ${shown}` : ""].filter(Boolean).join("; ");
       return `- ${d.name}: ${d.description || "(no description)"}${extra ? ` (${extra})` : ""}`;
     })
     .join("\n");
 }
 
+/** A family name for ids the catalogue doesn't rank (older or special versions): grok-4.20-… → Grok. */
+const familyGuess = (id: string) => (/^claude/i.test(id) ? "Claude" : /^(gpt|codex|o\d)/i.test(id) ? "GPT" : /^grok/i.test(id) ? "Grok" : /^gemini/i.test(id) ? "Gemini" : "Other");
+
+const withSpeed = (id: string) => {
+  const sp = speedLabel(id);
+  return sp ? `${id} (${sp})` : id;
+};
+
 /**
- * The models a subagent can run on, grouped by family, so the model can pick across providers
- * (a Claude session can hand a review to GPT, a search to a cheap model, …). Built once per
- * session with the tool list, so it doesn't disturb the prompt cache.
+ * How to pick a subagent's model: the gateway's models by size, each with its speed (measured on
+ * this machine when known), the quickest one for light work, and the rest by family. Built once
+ * per session with the tool list, so it doesn't disturb the prompt cache.
  */
 export function describeModels(ids: string[], current: string): string {
-  if (!ids.length) return "";
+  if (!ids.length) {
+    return `
+
+Choosing a model: pick per call by what the task needs; speed and cost matter. Use a small, fast model (haiku) for lookups, reading and summarizing; sonnet for ordinary coding; opus or yours for hard reasoning. model takes any id the gateway serves, or opus / sonnet / haiku.`;
+  }
+  const fam = familyOf(current);
+  const picks = tierPicks(ids, fam);
+  const t = tierOf(current);
+  const you = current ? `You are on ${current}${t ? ` (${t.tier}, ${speedLabel(current)})` : ""}.` : "";
+  const tierLines = TIERS.filter((tier) => picks[tier].length).map((tier) => `- ${tier}: for ${TIER_USE[tier]}. ${picks[tier].map(withSpeed).join("; ")}`);
+  const fastest = fastestModel(ids, fam);
+  const shown = new Set(TIERS.flatMap((tier) => picks[tier]));
   const groups = new Map<string, string[]>();
   for (const id of ids) {
-    const fam = id.includes("/") ? id.split("/")[0] : /^claude/i.test(id) ? "Claude" : /^(gpt|codex|o\d)/i.test(id) ? "OpenAI" : /^grok/i.test(id) ? "Grok" : /^gemini/i.test(id) ? "Gemini" : "Other";
-    if (!groups.has(fam)) groups.set(fam, []);
-    groups.get(fam)!.push(id);
+    if (shown.has(id)) continue;
+    const g = id.includes("/") ? id.split("/")[0] : (familyOf(id) ?? familyGuess(id));
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g)!.push(id);
   }
-  const lines = [...groups.entries()].map(([fam, list]) => `- ${fam}: ${list.slice(0, 25).join(", ")}${list.length > 25 ? `, … (${list.length - 25} more)` : ""}`);
+  const other = [...groups.entries()].map(([g, list]) => `- ${g}: ${list.slice(0, 25).join(", ")}${list.length > 25 ? `, … (${list.length - 25} more)` : ""}`);
   return `
 
-Models you can give a subagent (model; default: the type's model, else yours, ${current}). Any of them works, across providers; pick by the job: a different family for an independent second opinion or review, a small fast model for simple searches and summaries, a strong model for hard reasoning. Prefixed ids (e.g. openrouter/…, unlid/…) are pay-per-use.
-${lines.join("\n")}`;
+Choosing a model: decide on every call from what the task needs. Speed and cost matter as much as strength. A simple job on a large model wastes time and money; a hard one on a small model comes back wrong. ${you}
+Models on this gateway by size, smallest first. In brackets: speed class, and the output speed and wait for the first token measured on this machine, where known.
+${tierLines.join("\n")}
+${fastest ? `For really light work (one lookup, reading a file or two, a short summary) use model "fastest", now ${fastest}.\n` : ""}model also takes a size ("small", "medium", "large", "frontier": that size in your family when it has one), opus / sonnet / haiku, or any id on the gateway. The agent type doesn't decide the model: a quick search is small even as explore; a deep "how does this work and why does it break" exploration deserves medium or large. A different family gives an independent second opinion. Leave model out to use the type's default model, else yours.${
+    other.length ? `\nOther models (any id works; prefixed ids such as openrouter/… or unlid/… may be pay-per-use):\n${other.join("\n")}` : ""
+  }`;
 }
 
 export function agentTool(defs: AgentDef[], cfg: Config, models: string[] = [], current = ""): Tool {
@@ -336,14 +374,14 @@ Use subagents for independent pieces of work you can run in parallel (e.g. resea
 The subagent sees none of this conversation: put everything it needs in prompt (the goal, relevant paths, what you already know or ruled out, and what to return). Its answer comes to you, not the person, so relay what matters. Subagents can't start subagents.
 
 Agent types (agent_type, default general):
-${describeTypes(defs, cfg)}${describeModels(models, current)}`,
+${describeTypes(defs, cfg, models, current)}${describeModels(models, current)}`,
       parameters: {
         type: "object",
         properties: {
           description: { type: "string", description: "A short (3-6 word) description of the task" },
           prompt: { type: "string", description: "The full task for the subagent, with all the context it needs" },
           agent_type: { type: "string", enum: names, description: "Which kind of agent to start (default general)" },
-          model: { type: "string", description: "Optional: a model id from the list above (any provider), or opus / sonnet / haiku. Default: the type's model, else yours." },
+          model: { type: "string", description: "The model for this task: \"fastest\" for light work, a size (small / medium / large / frontier), opus / sonnet / haiku, or any model id listed above. Default: the type's default model, else yours." },
         },
         required: ["description", "prompt"],
       },
@@ -354,7 +392,7 @@ ${describeTypes(defs, cfg)}${describeModels(models, current)}`,
     asks: () => false,
     title(i) {
       const type = typeof i?.agent_type === "string" && i.agent_type && i.agent_type !== "general" ? ` (${i.agent_type})` : "";
-      const m = resolveModel(i?.model);
+      const m = resolveModel(i?.model, models, familyOf(current));
       return `Agent${type}: ${String(i?.description ?? "").trim() || "subagent"}${m ? ` [${m}]` : ""}`;
     },
     paths: () => [],
@@ -377,13 +415,25 @@ registerToolProvider({
 registerCommand({
   name: "agents",
   description: "List the subagent types and where they come from",
-  run({ session, print }) {
+  async run({ session, print }) {
     const defs = loadAgentDefs(session.data.cwd);
+    let ids: string[] = [];
+    try {
+      ids = ((await session.gateway.models?.()) ?? []).map((m) => m.id);
+    } catch {}
     const lines = ["Subagent types:"];
     for (const d of defs) {
-      const m = resolveModel(session.cfg.subagentModels?.[d.name]) ?? resolveModel(d.model);
+      const asked = session.cfg.subagentModels?.[d.name] ?? d.model;
+      const m = resolveModel(asked, ids, familyOf(session.data.model));
       lines.push(`- ${d.name}: ${d.description || "(no description)"}`);
       lines.push(`  tools: ${d.tools ? d.tools.join(", ") : "all"} · model: ${m ?? "same as the session"} · from: ${d.source}`);
+    }
+    if (ids.length) {
+      const picks = tierPicks(ids, familyOf(session.data.model));
+      lines.push("", "Models by size (speed measured here where known):");
+      for (const tier of TIERS) if (picks[tier].length) lines.push(`- ${tier}: ${picks[tier].map(withSpeed).join("; ")}`);
+      const f = fastestModel(ids, familyOf(session.data.model));
+      if (f) lines.push(`- fastest: ${f}`);
     }
     lines.push("", "Add your own as Markdown files (frontmatter: name, description, tools, model; the body is its instructions) in these folders, later ones winning:");
     for (const d of agentDirs(session.data.cwd)) lines.push(`- ${d}`);

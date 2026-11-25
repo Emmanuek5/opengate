@@ -1,5 +1,6 @@
 import type { Config, Mode } from "./config";
 import { apiFor, contextWindow, type Gateway } from "./gateway";
+import { recordSpeed, smallModel } from "./models";
 import { COMPACT_PROMPT, systemPrompt } from "./prompt";
 import { autoCompactFor, isContextOverflow, learnWindow, parseContextLimit } from "./compaction";
 import { newId, saveSession, type SessionFile } from "./store";
@@ -313,17 +314,28 @@ export class Session {
       let streamed = "";
       const model = this.data.model;
       let turn;
+      // For the model's measured speed: when the request went out and the first token came back.
+      const sent = Date.now();
+      let first = 0;
+      const mark = () => {
+        if (!first) first = Date.now();
+      };
       try {
         turn = await this.llm().turn(
           { model, system: this.system, messages: this.data.messages, tools, effort: this.data.effort, sessionId: this.id, signal, cacheTtl: this.cfg.cacheTtl ?? "1h", labels: this.data.parentId ? { purpose: "subagent", parent: this.data.parentId } : { purpose: "main" } },
           {
             text: (d) => {
+              mark();
               streamed += d;
               ui.text(d);
             },
-            thinking: (d) => ui.thinking(d),
+            thinking: (d) => {
+              mark();
+              ui.thinking(d);
+            },
           },
         );
+        if (first) recordSpeed(model, turn.usage.output, first - sent, Date.now() - first);
       } catch (err) {
         if (signal.aborted) {
           if (streamed) this.data.messages.push({ role: "assistant", parts: [{ type: "text", text: streamed + "\n\n[interrupted]" }], ts: Date.now() });
@@ -465,13 +477,19 @@ export class Session {
   }
 
   /**
-   * Write the summary. The compaction model (default claude-haiku-5-5: fast and cheap) goes
+   * Write the summary. The compaction model (default: a small model, Claude Haiku, else GPT Luna, else another small one) goes
    * first; if it refuses, fails, says nothing, or the conversation is too big for it, the
    * session's own model writes it. `compactModel: "same"` always uses the session's model.
    */
   private async summarize(signal?: AbortSignal): Promise<{ summary: string; model: string }> {
     const own = this.data.model;
-    const pick = this.cfg.compactModel === "same" ? own : (this.cfg.compactModel || "claude-haiku-5-5");
+    let small: string | undefined;
+    if (!this.cfg.compactModel) {
+      try {
+        small = smallModel(((await this.gateway.models?.()) ?? []).map((m) => m.id));
+      } catch {}
+    }
+    const pick = this.cfg.compactModel === "same" ? own : (this.cfg.compactModel || small || "claude-haiku-5-5");
     const candidates = [pick, own].filter((m, i, a) => a.indexOf(m) === i);
     let lastError = "";
     for (const model of candidates) {

@@ -158,7 +158,7 @@ Built-in tools: `read_file`, `edit_file` (exact replacement), `write_file`, `glo
 1. Your own rules from the config. Deny rules apply in every mode.
 2. Built-in hard blocks, in every mode, for things like wiping disks, recursive deletes of home or system folders, piping downloads into a shell, force-pushing to main and sending secrets out. POSIX and PowerShell forms are both covered.
 3. Fast paths: routine commands and edits inside the project run without a model call.
-4. Everything else is reviewed by a fast model (default `claude-haiku-5-5`), which allows it, asks you, or blocks it, with a reason.
+4. Everything else is reviewed by a small model (by default the first your gateway has of Claude Haiku, GPT Luna, or another small model, else the session's own), which allows it, asks you, or blocks it, with a reason.
 
 If the guard can't be reached, it asks you; it never allows by default. It covers subagents and MCP tools too. For no prompts and no checks at all, use Full auto with `/guard off` (or `"guard": false` in the config).
 
@@ -179,8 +179,10 @@ If the guard can't be reached, it asks you; it never allows by default. It cover
 
 The `agent` tool starts child sessions with their own context. Several can run at once, each on any model your gateway serves. Built-in types are `general` (all tools) and `explore` (read-only, for searching and understanding code). Define your own as Markdown files with `name`, `description`, `tools` and `model` frontmatter in `.opengate/agents/` or `.claude/agents/`, in the project or your home folder. Subagents can't start subagents, inherit your permission mode, and ask you through the main session.
 
+The agent picks a model for each subagent by what the task needs. Its tool lists your gateway's models by size (small < medium < large < frontier: Haiku < Sonnet < Opus < Fable, GPT Luna < Terra < Sol < Astra, Gemini Hydrogen < Neon < Argon/Carbon, …), with how fast each is. Speeds are measured on your machine from your own sessions, so a model behind a slow route shows up as slow. It can ask for a model by id, by size (`"small"`, `"medium"`, `"large"`, `"frontier"`, from its own family when it has one), or with `"fastest"` for light work. If it gives none, `explore` runs on the fastest small model and other types on the session's model. `/agents` shows what each name resolves to. You can set a type's default yourself:
+
 ```json
-{ "subagentModels": { "explore": "claude-haiku-5-5" } }
+{ "subagentModels": { "explore": "fastest", "general": "medium" } }
 ```
 
 ## Memory

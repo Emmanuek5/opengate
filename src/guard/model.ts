@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { smallModel } from "../models";
 import { relative, isAbsolute } from "node:path";
 import { errorText } from "../agent";
 import type { PermissionRequest, PermissionVerdict } from "../ext";
@@ -8,7 +9,11 @@ import type { Msg } from "../types";
 /** The fast model that reviews actions in auto mode. */
 export const DEFAULT_GUARD_MODEL = "claude-haiku-5-5";
 /** tunable for tests */
-export const guardSettings = { timeoutMs: 12_000, maxTokens: 300 };
+/**
+ * The answer is a short JSON object, but reasoning models (GPT, Grok, Claude models whose thinking
+ * can't be turned off) spend reasoning tokens from the same budget first: leave them room.
+ */
+export const guardSettings = { timeoutMs: 12_000, maxTokens: 2000 };
 
 export const GUARD_SYSTEM = `You are the safety reviewer for opengate, a coding agent that works on a developer's machine without asking before each action. Before an action runs you decide whether it may run on its own ("allow"), needs the person's confirmation first ("ask"), or must be blocked ("deny").
 
@@ -175,10 +180,23 @@ function normalizeReply(o: any): GuardReply | null {
   return { decision, risk, reason };
 }
 
+/**
+ * The model that reviews actions: your guardModel, else a small model the gateway has (Claude
+ * Haiku, then GPT Luna, then any other small model), else the session's own model.
+ */
+export async function guardModelFor(session: PermissionRequest["session"]): Promise<string> {
+  if (session.cfg.guardModel) return session.cfg.guardModel;
+  try {
+    const ids = ((await session.gateway.models?.()) ?? []).map((m) => m.id);
+    if (ids.length) return smallModel(ids) ?? session.data.model;
+  } catch {}
+  return DEFAULT_GUARD_MODEL;
+}
+
 /** Ask the guard model. Never allows on failure: timeouts, errors and unreadable answers become "ask". */
 export async function reviewWithModel(req: PermissionRequest): Promise<{ verdict: PermissionVerdict; ok: boolean }> {
   const { session } = req;
-  const model = session.cfg.guardModel || DEFAULT_GUARD_MODEL;
+  const model = await guardModelFor(session);
   const nonce = randomBytes(8).toString("hex");
   const fail = (why: string) => ({ verdict: { decision: "ask" as const, reason: `safety check unavailable: ${why}`, by: "guard" }, ok: false });
   const ac = new AbortController();
@@ -203,6 +221,7 @@ export async function reviewWithModel(req: PermissionRequest): Promise<{ verdict
         messages: [{ role: "user", parts: [{ type: "text", text: buildReview(req, nonce) }] }],
         tools: [],
         effort: "low",
+        thinking: false,
         sessionId: `${session.id}-guard`,
         labels: { purpose: "guard", parent: session.id },
         signal: ac.signal,

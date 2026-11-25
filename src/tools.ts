@@ -182,11 +182,32 @@ export function applyEdit(text: string, oldS: string, newS: string, all: boolean
   return { text: all ? text.split(o).join(n) : text.replace(o, () => n), count };
 }
 
+type EditSpec = { old_string?: unknown; new_string?: unknown; replace_all?: unknown };
+
+/** The edits one edit_file call asks for: an `edits` list, or the single old_string / new_string. */
+function editsOf(i: any): EditSpec[] {
+  return Array.isArray(i?.edits) && i.edits.length ? i.edits : [i ?? {}];
+}
+
+/** Apply edits in order, all or nothing: the first that fails stops the lot, and says which it was. */
+export function applyEdits(text: string, edits: EditSpec[]): { text: string; count: number } | string {
+  let cur = text;
+  let count = 0;
+  for (let k = 0; k < edits.length; k++) {
+    const e = edits[k];
+    const r = applyEdit(cur, str(e.old_string), str(e.new_string), !!e.replace_all);
+    if (typeof r === "string") return edits.length > 1 ? `Edit ${k + 1} of ${edits.length}: ${r} No edits were made.` : r;
+    cur = r.text;
+    count += r.count;
+  }
+  return { text: cur, count };
+}
+
 const editFile: Tool = {
   spec: {
     name: "edit_file",
     description:
-      "Replace exact text in a file you have read. old_string must match the file exactly (whitespace included) and be unique unless replace_all is set. Don't include the line-number prefixes from read_file.",
+      "Replace exact text in a file you have read. old_string must match the file exactly (whitespace included) and be unique unless replace_all is set. Don't include the line-number prefixes from read_file. For several changes to one file, pass them all at once in edits (applied in order, all or nothing) instead of calling this repeatedly.",
     parameters: {
       type: "object",
       properties: {
@@ -194,8 +215,17 @@ const editFile: Tool = {
         old_string: { type: "string", description: "Exact text to replace" },
         new_string: { type: "string", description: "Replacement text" },
         replace_all: { type: "boolean", description: "Replace every occurrence" },
+        edits: {
+          type: "array",
+          description: "Several replacements in this file, applied in order (instead of old_string / new_string)",
+          items: {
+            type: "object",
+            properties: { old_string: { type: "string" }, new_string: { type: "string" }, replace_all: { type: "boolean" } },
+            required: ["old_string", "new_string"],
+          },
+        },
       },
-      required: ["path", "old_string", "new_string"],
+      required: ["path"],
     },
   },
   kind: "edit",
@@ -206,7 +236,7 @@ const editFile: Tool = {
     const p = abs(i.path, ctx.cwd);
     if (!existsSync(p)) return null;
     const old = readFileSync(p, "utf8");
-    const r = applyEdit(old, str(i.old_string), str(i.new_string), !!i.replace_all);
+    const r = applyEdits(old, editsOf(i));
     return typeof r === "string" ? null : { path: p, oldText: old, newText: r.text };
   },
   async run(i, ctx) {
@@ -215,7 +245,7 @@ const editFile: Tool = {
     const stale = checkFresh(p, ctx);
     if (stale) return { output: stale, isError: true };
     const old = readFileSync(p, "utf8");
-    const r = applyEdit(old, str(i.old_string), str(i.new_string), !!i.replace_all);
+    const r = applyEdits(old, editsOf(i));
     if (typeof r === "string") return { output: r, isError: true };
     writeFileSync(p, r.text);
     ctx.readFiles.set(p, statSync(p).mtimeMs);

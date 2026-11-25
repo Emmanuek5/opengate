@@ -29,6 +29,8 @@ export const BUILT_IN: AgentDef[] = [
     name: "explore",
     description: "Fast read-only agent for searching and understanding code: finding files, usages and how things work. Tools: read_file, glob, grep.",
     tools: READ_ONLY_TOOLS,
+    // The quickest small model on the gateway, unless the caller picks another (a deep exploration may want a bigger one).
+    model: "fastest",
     prompt:
       "You are an exploration agent. You can only read and search (read_file, glob, grep); you can't change files or run commands. Search broadly, then read what matters, and answer with concrete paths, line numbers and short excerpts.",
     source: "built-in",

@@ -43,6 +43,8 @@ export interface LlmRequest {
   sessionId: string;
   signal?: AbortSignal;
   maxTokens?: number;
+  /** false: a short answer that needs no reasoning (safety checks). Thinking is turned off where the model allows it. */
+  thinking?: boolean;
   /** how long the provider should keep the cached prefix (Anthropic: "5m" or "1h") */
   cacheTtl?: "5m" | "1h";
   /** sent as x-opengate-<name> headers so a gateway can tell main, subagent, compaction and guard calls apart */

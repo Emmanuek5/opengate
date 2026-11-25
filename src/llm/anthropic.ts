@@ -8,6 +8,15 @@ export function modernClaude(model: string): boolean {
   return /^claude-(fable|mythos)/.test(m) || /^claude-(opus|sonnet|haiku)-5/.test(m) || /^claude-(opus|sonnet)-4-[6-9]/.test(m);
 }
 
+/**
+ * Claude models that take thinking: {type: "disabled"} (at effort high or below). Opus 5.5,
+ * Sonnet 5.5 and Fable reject it; those keep adaptive thinking at low effort instead.
+ */
+export function canDisableThinking(model: string): boolean {
+  const m = model.toLowerCase().split("/").pop()!;
+  return /^claude-haiku-5/.test(m) || /^claude-(opus|sonnet)-5$/.test(m) || /^claude-(opus|sonnet)-4-[6-9]/.test(m);
+}
+
 export function toAnthropic(model: string, messages: Msg[]): Anthropic.MessageParam[] {
   const out: Anthropic.MessageParam[] = [];
   for (const m of messages) {
@@ -51,7 +60,8 @@ export class AnthropicLlm implements Llm {
 
   async turn(req: LlmRequest, sink: LlmSink): Promise<LlmTurn> {
     const modern = modernClaude(req.model);
-    const effort = req.effort === "auto" ? "high" : req.effort;
+    const noThinking = req.thinking === false && modern && canDisableThinking(req.model);
+    const effort = req.thinking === false ? "low" : req.effort === "auto" ? "high" : req.effort;
     const params: Anthropic.MessageCreateParamsStreaming = {
       model: req.model,
       max_tokens: req.maxTokens ?? (modern ? 64_000 : 32_000),
@@ -61,7 +71,7 @@ export class AnthropicLlm implements Llm {
       // Cache the whole prefix; each turn only adds to the end.
       cache_control: { type: "ephemeral", ...(req.cacheTtl === "1h" ? { ttl: "1h" } : {}) } as any,
       stream: true,
-      ...(modern ? { thinking: { type: "adaptive", display: "summarized" } as any, output_config: { effort: effort as any } } : {}),
+      ...(modern ? { thinking: (noThinking ? { type: "disabled" } : { type: "adaptive", display: "summarized" }) as any, output_config: { effort: effort as any } } : {}),
     };
     const stream = this.client.messages.stream(params, { headers: headers(req.sessionId, req.labels), signal: req.signal });
     for await (const ev of stream) {
