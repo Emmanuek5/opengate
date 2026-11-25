@@ -64,6 +64,10 @@ function toolContent(r: ToolResult): acp.ToolCallContent[] {
 
 /** Streams a session's work to the client as session/update notifications. */
 class AcpUI implements AgentUI {
+  /** tool calls the client has been told about */
+  private announced = new Set<string>();
+  /** recent activity per running subagent, shown on the parent's agent call */
+  private progress = new Map<string, Map<string, string>>();
   constructor(
     private client: Client,
     private session: Session,
@@ -78,15 +82,44 @@ class AcpUI implements AgentUI {
     this.send({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: d } });
   }
   toolStart(c: ToolCallInfo) {
+    this.announced.add(c.id);
     this.send({ sessionUpdate: "tool_call", toolCallId: c.id, title: c.title, kind: c.kind, status: "pending", rawInput: c.input, locations: c.paths.map((path) => ({ path })) });
   }
   toolEnd(c: ToolCallInfo, r: ToolResult) {
     this.send({ sessionUpdate: "tool_call_update", toolCallId: c.id, status: r.isError ? "failed" : "completed", content: toolContent(r), rawOutput: { output: r.output.slice(0, 20_000) } });
   }
   async ask(c: ToolCallInfo, diff: Diff | null) {
+    // A subagent's call (id "<agent call>/<child call>") hasn't been shown yet: show it first, so
+    // the client has a tool call to attach the permission request to.
+    const forwarded = !this.announced.has(c.id);
+    if (forwarded) {
+      this.announced.add(c.id);
+      this.send({ sessionUpdate: "tool_call", toolCallId: c.id, title: c.title, kind: c.kind, status: "pending", rawInput: c.input, locations: c.paths.map((path) => ({ path })) });
+    }
+    const decision = await this.askClient(c, diff);
+    if (forwarded)
+      this.send({
+        sessionUpdate: "tool_call_update",
+        toolCallId: c.id,
+        status: decision === "deny" ? "failed" : "completed",
+        content: [{ type: "content", content: { type: "text", text: decision === "deny" ? "Rejected." : "Approved; the subagent runs it." } }],
+      });
+    return decision;
+  }
+  private async askClient(c: ToolCallInfo, diff: Diff | null): Promise<"once" | "always" | "deny"> {
+    const reason = c.reason ? `\n\nSafety check: ${c.reason}` : "";
     const res = await this.client.request("session/request_permission", {
       sessionId: this.session.id,
-      toolCall: { toolCallId: c.id, title: c.title, kind: c.kind, rawInput: c.input, ...(diff ? { content: [{ type: "diff", path: diff.path, oldText: diff.oldText, newText: diff.newText }] } : {}) },
+      toolCall: {
+        toolCallId: c.id,
+        title: c.title,
+        kind: c.kind,
+        rawInput: c.input,
+        content: [
+          ...(diff ? [{ type: "diff" as const, path: diff.path, oldText: diff.oldText, newText: diff.newText }] : []),
+          ...(reason ? [{ type: "content" as const, content: { type: "text" as const, text: reason.trim() } }] : []),
+        ],
+      },
       options: [
         { optionId: "once", name: "Allow", kind: "allow_once" },
         { optionId: "always", name: c.kind === "execute" ? "Always allow commands" : "Always allow edits", kind: "allow_always" },
@@ -101,14 +134,26 @@ class AcpUI implements AgentUI {
     this.send({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: `\n_${message}_\n` } });
   }
   event(e: import("./ext").AgentEvent) {
-    // Subagent progress shows on the parent `agent` call; its final result comes with toolEnd.
-    if (e.type !== "subagent" || typeof e.parentCallId !== "string" || e.status !== "running") return;
-    const activity = typeof e.activity === "string" ? e.activity : "";
+    // Subagent progress shows on the parent `agent` call as a short running log; its final
+    // result replaces it with toolEnd.
+    if (e.type !== "subagent" || typeof e.parentCallId !== "string") return;
+    if (e.status !== "running") {
+      this.progress.delete(e.parentCallId);
+      return;
+    }
+    const activity = typeof e.activity === "string" ? e.activity.replace(/\s+/g, " ").trim().slice(0, 160) : "";
+    if (!activity) return;
+    const log = this.progress.get(e.parentCallId) ?? new Map<string, string>();
+    log.delete(activity);
+    log.set(activity, activity);
+    while (log.size > 8) log.delete(log.keys().next().value!);
+    this.progress.set(e.parentCallId, log);
+    const model = typeof e.model === "string" ? ` · ${e.model}` : "";
     this.send({
       sessionUpdate: "tool_call_update",
       toolCallId: e.parentCallId,
       status: "in_progress",
-      ...(activity ? { content: [{ type: "content", content: { type: "text", text: activity } }] } : {}),
+      content: [{ type: "content", content: { type: "text", text: `Subagent${model} is working:\n${[...log.values()].map((a) => `- ${a}`).join("\n")}` } }],
     });
   }
   usage(s: Session) {

@@ -350,7 +350,7 @@ describe("subagents", () => {
     const onCall = updates.filter((u) => u.toolCallId === "p1");
     expect(onCall[0]).toMatchObject({ sessionUpdate: "tool_call", title: "Agent (explore): Read a [claude-haiku-5-5]" });
     const progress = onCall.filter((u) => u.sessionUpdate === "tool_call_update" && u.status === "in_progress");
-    expect(progress.some((u) => u.content?.[0]?.content?.text === "Read a.txt")).toBe(true);
+    expect(progress.some((u) => /Subagent.* is working:\n(.*\n)*- Read a\.txt/.test(u.content?.[0]?.content?.text ?? ""))).toBe(true);
     expect(onCall.at(-1)).toMatchObject({ sessionUpdate: "tool_call_update", status: "completed" });
     expect(onCall.at(-1).rawOutput.output).toStartWith("a.txt holds x");
     // the child's text never reaches the parent's message stream

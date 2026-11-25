@@ -230,7 +230,27 @@ function describeTypes(defs: AgentDef[], cfg: Config): string {
     .join("\n");
 }
 
-export function agentTool(defs: AgentDef[], cfg: Config): Tool {
+/**
+ * The models a subagent can run on, grouped by family, so the model can pick across providers
+ * (a Claude session can hand a review to GPT, a search to a cheap model, …). Built once per
+ * session with the tool list, so it doesn't disturb the prompt cache.
+ */
+export function describeModels(ids: string[], current: string): string {
+  if (!ids.length) return "";
+  const groups = new Map<string, string[]>();
+  for (const id of ids) {
+    const fam = id.includes("/") ? id.split("/")[0] : /^claude/i.test(id) ? "Claude" : /^(gpt|codex|o\d)/i.test(id) ? "OpenAI" : /^grok/i.test(id) ? "Grok" : /^gemini/i.test(id) ? "Gemini" : "Other";
+    if (!groups.has(fam)) groups.set(fam, []);
+    groups.get(fam)!.push(id);
+  }
+  const lines = [...groups.entries()].map(([fam, list]) => `- ${fam}: ${list.slice(0, 25).join(", ")}${list.length > 25 ? `, … (${list.length - 25} more)` : ""}`);
+  return `
+
+Models you can give a subagent (model; default: the type's model, else yours, ${current}). Any of them works, across providers; pick by the job: a different family for an independent second opinion or review, a small fast model for simple searches and summaries, a strong model for hard reasoning. Prefixed ids (e.g. openrouter/…, unlid/…) are pay-per-use.
+${lines.join("\n")}`;
+}
+
+export function agentTool(defs: AgentDef[], cfg: Config, models: string[] = [], current = ""): Tool {
   const names = defs.map((d) => d.name);
   return {
     spec: {
@@ -242,14 +262,14 @@ Use subagents for independent pieces of work you can run in parallel (e.g. resea
 The subagent sees none of this conversation: put everything it needs in prompt (the goal, relevant paths, what you already know or ruled out, and what to return). Its answer comes to you, not the person, so relay what matters. Subagents can't start subagents.
 
 Agent types (agent_type, default general):
-${describeTypes(defs, cfg)}`,
+${describeTypes(defs, cfg)}${describeModels(models, current)}`,
       parameters: {
         type: "object",
         properties: {
           description: { type: "string", description: "A short (3-6 word) description of the task" },
           prompt: { type: "string", description: "The full task for the subagent, with all the context it needs" },
           agent_type: { type: "string", enum: names, description: "Which kind of agent to start (default general)" },
-          model: { type: "string", description: "Optional: any gateway model id, or opus / sonnet / haiku. Default: the type's model, else yours." },
+          model: { type: "string", description: "Optional: a model id from the list above (any provider), or opus / sonnet / haiku. Default: the type's model, else yours." },
         },
         required: ["description", "prompt"],
       },
@@ -270,7 +290,14 @@ ${describeTypes(defs, cfg)}`,
 
 registerToolProvider({
   name: "subagents",
-  tools: (s) => (s.data.parentId ? [] : [agentTool(loadAgentDefs(s.data.cwd), s.cfg)]),
+  async tools(s) {
+    if (s.data.parentId) return [];
+    let models: string[] = [];
+    try {
+      models = (await s.gateway.models?.())?.map((m) => m.id) ?? [];
+    } catch {}
+    return [agentTool(loadAgentDefs(s.data.cwd), s.cfg, models, s.data.model)];
+  },
 });
 
 registerCommand({

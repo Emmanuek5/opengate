@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.2.1";
 
 const isWin = process.platform === "win32";
 const isMac = process.platform === "darwin";
