@@ -46,6 +46,10 @@ export interface NewSession {
   id?: string;
   /** set for subagents: the session that started this one */
   parentId?: string;
+  /** only offer these tools (by name); default: all */
+  allowedTools?: string[];
+  /** text appended to the system prompt (e.g. a subagent's instructions) */
+  extraSystem?: string;
 }
 
 export class Session {
@@ -58,6 +62,10 @@ export class Session {
   private started: Promise<void> | null = null;
   /** the tools offered in the current prompt */
   private toolset: Tool[] = TOOLS;
+  /** only offer these tools (by name); undefined offers all. Not saved. */
+  allowedTools?: string[];
+  /** appended to the system prompt. Not saved. */
+  extraSystem?: string;
 
   constructor(
     public data: SessionFile,
@@ -69,7 +77,7 @@ export class Session {
 
   static create(gateway: Session["gateway"], cfg: Config, o: NewSession): Session {
     const now = Date.now();
-    return new Session(
+    const s = new Session(
       {
         version: 1,
         id: o.id ?? newId(),
@@ -88,6 +96,9 @@ export class Session {
       gateway,
       cfg,
     );
+    if (o.allowedTools) s.allowedTools = [...o.allowedTools];
+    if (o.extraSystem) s.extraSystem = o.extraSystem;
+    return s;
   }
 
   /** Run the session hooks once (connect MCP servers, …). Called before the first prompt. */
@@ -124,7 +135,8 @@ export class Session {
       }
     }
     const seen = new Set<string>();
-    return all.filter((t) => !seen.has(t.spec.name) && seen.add(t.spec.name));
+    const allowed = this.allowedTools ? new Set(this.allowedTools) : null;
+    return all.filter((t) => !seen.has(t.spec.name) && seen.add(t.spec.name) && (!allowed || allowed.has(t.spec.name)));
   }
 
   /** The system prompt: built-in instructions plus every prompt section. */
@@ -138,6 +150,7 @@ export class Session {
         console.error(`opengate: prompt section ${sec.name} failed: ${(e as Error)?.message ?? e}`);
       }
     }
+    if (this.extraSystem?.trim()) s += `\n\n${this.extraSystem.trim()}`;
     return s;
   }
 
@@ -310,7 +323,7 @@ export class Session {
     const verdicts: PermissionVerdict[] = [];
     for (const p of getPermissionPolicies()) {
       try {
-        const v = await p.decide({ session: this, call: info, tool, diff });
+        const v = await p.decide({ session: this, call: info, tool, diff, signal, ui });
         if (v) verdicts.push({ by: p.name, ...v });
       } catch (e) {
         verdicts.push({ decision: "ask", reason: `${p.name} failed: ${(e as Error)?.message ?? e}`, by: p.name });

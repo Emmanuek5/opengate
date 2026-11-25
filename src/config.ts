@@ -42,9 +42,24 @@ export interface Config {
   permissions?: { allow?: string[]; deny?: string[] };
   /** the model that reviews actions in auto mode (default claude-haiku-5-5) */
   guardModel?: string;
+  /** the safety guard (built-in blocks, auto-mode review); false turns it off by default (your permissions rules still apply) */
+  guard?: boolean;
   /** context window per model id (or prefix ending in *), for compaction */
   contextWindows?: Record<string, number>;
+  /** default model per subagent type, e.g. { explore: "claude-haiku-5-5" } (aliases opus/sonnet/haiku work) */
+  subagentModels?: Record<string, string>;
+  /**
+   * MCP servers, Claude-style: { name: { command, args?, env?, cwd? } | { type: "http" | "sse", url, headers? } }.
+   * `${VAR}` and `${VAR:-default}` are expanded from the environment. Add `disabled: true` to turn one off.
+   */
+  mcpServers?: Record<string, McpServerConfig>;
+  /** also start the servers in the project's .mcp.json (off by default: project files can run commands) */
+  projectMcp?: boolean;
 }
+
+export type McpServerConfig =
+  | { type?: "stdio"; command: string; args?: string[]; env?: Record<string, string>; cwd?: string; disabled?: boolean }
+  | { type: "http" | "sse"; url: string; headers?: Record<string, string>; disabled?: boolean };
 
 export const configPath = () => join(configDir(), "config.json");
 

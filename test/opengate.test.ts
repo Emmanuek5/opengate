@@ -180,7 +180,7 @@ describe("permissions and extensions", () => {
     ext.registerPermissionPolicy({ name: "test-guard", decide: ({ call }) => (call.name === "shell" ? { decision: decisions[call.input.command] ?? "ask", reason: `policy says ${decisions[call.input.command]}` } : null) });
     const run = async (mode: any, command: string, answer: "once" | "deny" = "deny") => {
       const llm = new FakeLlm([() => ({ parts: [{ type: "tool_call", id: "1", name: "shell", input: { command } }] }), () => ({ parts: [{ type: "text", text: "ok" }] })]);
-      const s = Session.create({ llm: () => llm }, {}, { cwd: dir, model: "m", mode });
+      const s = Session.create({ llm: () => llm }, { guard: false }, { cwd: dir, model: "m", mode });
       const u = ui([answer]);
       await s.prompt([{ type: "text", text: "go" }], u);
       const out = (llm.calls[1].messages.at(-1)!.parts[0] as any).output as string;

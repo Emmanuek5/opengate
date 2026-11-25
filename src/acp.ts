@@ -99,7 +99,17 @@ class AcpUI implements AgentUI {
   notice(message: string) {
     this.send({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: `\n_${message}_\n` } });
   }
-  event() {}
+  event(e: import("./ext").AgentEvent) {
+    // Subagent progress shows on the parent `agent` call; its final result comes with toolEnd.
+    if (e.type !== "subagent" || typeof e.parentCallId !== "string" || e.status !== "running") return;
+    const activity = typeof e.activity === "string" ? e.activity : "";
+    this.send({
+      sessionUpdate: "tool_call_update",
+      toolCallId: e.parentCallId,
+      status: "in_progress",
+      ...(activity ? { content: [{ type: "content", content: { type: "text", text: activity } }] } : {}),
+    });
+  }
   usage(s: Session) {
     this.send({ sessionUpdate: "usage_update", used: s.data.contextUsed, size: s.contextSize });
   }

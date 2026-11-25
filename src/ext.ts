@@ -82,6 +82,7 @@ export const getSessionHooks = (): readonly SessionHook[] => sessionHooks;
  * - { type: "memory", action: "saved" | "updated" | "deleted", scope: "project" | "global", name }
  * - { type: "skill", action: "loaded", name }
  * - { type: "mcp", server, status: "connected" | "failed" | "closed", tools?, error? }
+ * - { type: "guard", status: "checking", tool, title }: the safety model is reviewing an action
  */
 export type AgentEvent = { type: string; [key: string]: unknown };
 
@@ -93,6 +94,10 @@ export interface PermissionRequest {
   tool: Tool;
   /** what an edit would change, when the tool can tell */
   diff: import("./tools").Diff | null;
+  /** aborted when the person stops the turn */
+  signal?: AbortSignal;
+  /** the front end, e.g. to show that a check is running */
+  ui?: AgentUI;
 }
 
 export interface PermissionVerdict {
