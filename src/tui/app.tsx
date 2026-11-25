@@ -284,8 +284,11 @@ export const ItemView = memo(function ItemView({ item, ctl, cols }: { item: Item
     case "user":
       return (
         <Box marginTop={1}>
-          <Gutter mark={G.arrow} color={P.teal}>
-            <Text color={P.gray}>{item.text}</Text>
+          <Gutter mark={item.steer ? "↳" : G.arrow} color={item.steer ? P.amber : P.teal}>
+            <Text color={P.gray}>
+              {item.text}
+              {item.steer ? <Text color={P.dim}> (sent while working)</Text> : null}
+            </Text>
           </Gutter>
         </Box>
       );

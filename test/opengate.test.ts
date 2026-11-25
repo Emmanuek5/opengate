@@ -174,6 +174,29 @@ describe("agent loop", () => {
   });
 });
 
+describe("steering", () => {
+  test("a message sent during a turn goes after the tool results, in the same user message", async () => {
+    writeFileSync(join(dir, "a.txt"), "x\n");
+    let s: any;
+    const llm = new FakeLlm([
+      () => {
+        // the person speaks while the model is answering
+        s.steer([{ type: "text", text: "also check b.txt" }]);
+        return { parts: [{ type: "tool_call", id: "1", name: "read_file", input: { path: "a.txt" } }] };
+      },
+      () => ({ parts: [{ type: "text", text: "ok" }] }),
+    ]);
+    s = Session.create({ llm: () => llm }, {}, { cwd: dir, model: "m" });
+    const events: any[] = [];
+    await s.prompt([{ type: "text", text: "go" }], { ...ui(), event: (e: any) => events.push(e) });
+    const msg = llm.calls[1].messages.at(-1)!;
+    expect(msg.parts.map((p: any) => p.type)).toEqual(["tool_result", "text"]);
+    expect((msg.parts[1] as any).text).toContain("also check b.txt");
+    expect(events).toContainEqual(expect.objectContaining({ type: "steer", status: "delivered" }));
+    expect(s.steer([{ type: "text", text: "late" }])).toBe(false); // no turn running
+  });
+});
+
 describe("permissions and extensions", () => {
   test("auto mode follows the policy; deny wins in every mode; yolo never asks", async () => {
     const decisions: Record<string, "allow" | "ask" | "deny"> = { "echo ok": "allow", "make deploy": "ask", "rm -rf /": "deny" };

@@ -45,6 +45,8 @@ export interface LlmRequest {
   maxTokens?: number;
   /** how long the provider should keep the cached prefix (Anthropic: "5m" or "1h") */
   cacheTtl?: "5m" | "1h";
+  /** sent as x-opengate-<name> headers so a gateway can tell main, subagent, compaction and guard calls apart */
+  labels?: Record<string, string>;
 }
 
 export interface LlmSink {

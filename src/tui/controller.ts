@@ -15,6 +15,8 @@ import { listSessionsCompat, sessionRows, transcriptLines, wrapAnsi } from "./se
 import { getLiveSubagent, liveSubagents, watchSubagent } from "../subagents";
 import { defaultModelCommand } from "../defaults";
 import { updateHint } from "../update";
+import { clipboardImage, imageFromFile, imagePathsIn, MAX_IMAGE_BYTES, MAX_IMAGES, type ImagePart } from "../images";
+import type { Part } from "../types";
 import { ago, fg, fmtDuration, fmtK, G, MODE_STYLE, P, st, stripAnsi } from "./theme";
 
 // ---------------- state shapes ----------------
@@ -39,7 +41,7 @@ export interface ToolView {
 
 export type Item = { id: number } & (
   | { kind: "header" }
-  | { kind: "user"; text: string }
+  | { kind: "user"; text: string; steer?: boolean }
   | { kind: "md"; text: string; first: boolean }
   | { kind: "thinking"; text: string; ms: number }
   | { kind: "tool"; tool: ToolView }
@@ -135,7 +137,7 @@ export const BUILTIN: { name: string; args?: string; description: string }[] = [
 const RUN_WHILE_BUSY = new Set(["help", "?", "usage", "mode", "effort", "model", "models", "exit", "quit", "subagents", "watch"]);
 
 export const KEYS: [string, string][] = [
-  ["Enter", "send (queued while the agent works)"],
+  ["Enter", "send; while the agent works, it reads your message at its next step (steering)"],
   ["Shift+Enter · Alt+Enter · Ctrl+J", "new line (or end a line with \\)"],
   ["Up / Down", "history (or move between lines)"],
   ["Tab / Enter", "accept a suggestion (/ commands, @ files)"],
@@ -143,6 +145,7 @@ export const KEYS: [string, string][] = [
   ["Esc", "interrupt the agent · close a popup"],
   ["Ctrl+O", "expand the last collapsed output"],
   ["Ctrl+T", "watch a subagent's chat live"],
+  ["Alt+V · Ctrl+V", "paste an image from the clipboard (or drop an image file's path in)"],
   ["Ctrl+C", "clear the input · twice to quit"],
   ["Ctrl+D", "quit (on an empty input)"],
   ["!command", "run a shell command directly"],
@@ -184,6 +187,11 @@ export class Controller implements AgentUI {
   turnStart = 0;
   activity = "";
   queue: string[] = [];
+  /** messages sent to the running turn that the model hasn't seen yet */
+  steerPending: string[] = [];
+  /** pasted images, shown as [Image #n] in the input until the message is sent */
+  images = new Map<number, ImagePart>();
+  private imageCount = 0;
   hint: string | null = null;
   ed: E.Ed = E.empty;
   files: FileIndex;
@@ -403,6 +411,12 @@ export class Controller implements AgentUI {
         if (status) return this.push({ kind: "event", icon: "info", color: P.gray, text: `MCP ${str(e.server)} ${status}` });
         return;
       }
+      case "steer": {
+        // The model has now seen the oldest pending steering message.
+        this.steerPending.shift();
+        this.activity = "Reading your message";
+        return this.changed();
+      }
       default:
         return;
     }
@@ -487,6 +501,8 @@ export class Controller implements AgentUI {
     if (k.name === "tab" && k.shift) return this.cycleMode();
     if (k.ctrl && k.name === "o") return this.expand();
     if (k.ctrl && k.name === "t") return this.watchSubagents();
+    // Paste an image from the clipboard. Alt+V too: Windows Terminal keeps Ctrl+V for text.
+    if ((k.ctrl || k.meta) && k.name === "v") return this.pasteImage();
 
     const popup = this.popup();
     if (k.name === "escape") {
@@ -571,10 +587,11 @@ export class Controller implements AgentUI {
     this.s.cancel();
     this.shellAbort?.abort();
     for (const a of [...this.asks]) a.resolve("deny");
-    if (this.queue.length) {
-      // Give queued messages back so they can be edited or sent again.
-      const back = this.queue.join("\n");
+    if (this.queue.length || this.steerPending.length) {
+      // Give unsent messages back so they can be edited or sent again.
+      const back = [...this.steerPending, ...this.queue].join("\n");
       this.queue = [];
+      this.steerPending = [];
       this.ed = E.edOf(this.ed.text ? `${back}\n${this.ed.text}` : back);
     }
     this.activity = "Stopping";
@@ -741,6 +758,12 @@ export class Controller implements AgentUI {
     if (!fromQueue) this.addHistory(text);
     const isCmd = text.startsWith("/") && !text.startsWith("//");
     const name = isCmd ? text.slice(1).split(/\s+/)[0] : "";
+    // While a turn runs, a plain message steers it: the model reads it at its next step.
+    if (this.busy && !isCmd && !text.startsWith("!") && this.s.steer(this.messageParts(text))) {
+      this.steerPending.push(text);
+      this.push({ kind: "user", text, steer: true });
+      return;
+    }
     if (this.busy && !(isCmd && RUN_WHILE_BUSY.has(name))) {
       this.queue.push(text);
       return this.changed(true);
@@ -767,6 +790,41 @@ export class Controller implements AgentUI {
     } catch {}
   }
 
+  /** Read the clipboard's image and put an [Image #n] placeholder in the input. */
+  pasteImage() {
+    const r = clipboardImage();
+    if ("error" in r) return this.flashHint(`Couldn't paste an image: ${r.error}`);
+    if (r.data.length > MAX_IMAGE_BYTES) return this.flashHint("That image is too big to send (8 MB at most).");
+    const n = ++this.imageCount;
+    this.images.set(n, { type: "image", mediaType: r.mediaType, data: r.data.toString("base64") });
+    this.edit(E.insert(this.ed, `[Image #${n}] `));
+  }
+
+  /**
+   * A message as engine parts: the text, then its images. Images come from [Image #n]
+   * placeholders (pasted) and from paths to image files written in the message (dropped files).
+   */
+  messageParts(text: string): Part[] {
+    const parts: Part[] = [{ type: "text", text }];
+    const used = new Set<number>();
+    for (const m of text.matchAll(/\[Image #(\d+)\]/g)) {
+      const n = Number(m[1]);
+      const img = this.images.get(n);
+      if (img && !used.has(n)) {
+        used.add(n);
+        parts.push(img);
+      }
+    }
+    for (const n of used) this.images.delete(n);
+    for (const p of imagePathsIn(text, this.s.data.cwd)) {
+      if (parts.length > MAX_IMAGES) break;
+      const img = imageFromFile(p);
+      if (typeof img === "string") this.notice(img, "warn");
+      else parts.push(img);
+    }
+    return parts;
+  }
+
   private async busyWith<T>(activity: string, fn: () => Promise<T>): Promise<T> {
     this.busy = true;
     this.turnStart = Date.now();
@@ -782,12 +840,19 @@ export class Controller implements AgentUI {
   }
 
   private async turn(text: string) {
+    const parts = this.messageParts(text);
     this.push({ kind: "user", text });
+    const nImages = parts.filter((p) => p.type === "image").length;
+    if (nImages) this.push({ kind: "event", icon: "info", color: P.teal, text: `${nImages} image${nImages === 1 ? "" : "s"} attached` });
     const started = Date.now();
     await this.busyWith("Thinking", async () => {
       try {
-        const stop = await this.s.prompt([{ type: "text", text }], this);
+        const stop = await this.s.prompt(parts, this);
         this.finishTurn();
+        // Steering that arrived as the turn was ending: send it as the next message.
+        if (this.steerPending.length) {
+          this.queue.unshift(...this.steerPending.splice(0).map((t) => `${t}`));
+        }
         if (stop === "cancelled") this.notice("Interrupted. Tell the agent what to do differently.", "warn");
         else if (stop === "max_tokens") this.notice("The answer hit the output token limit.", "warn");
         else if (stop === "max_turn_requests") this.notice("Stopped after too many steps in one turn.", "warn");

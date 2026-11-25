@@ -204,6 +204,7 @@ export async function reviewWithModel(req: PermissionRequest): Promise<{ verdict
         tools: [],
         effort: "low",
         sessionId: `${session.id}-guard`,
+        labels: { purpose: "guard", parent: session.id },
         signal: ac.signal,
         maxTokens: guardSettings.maxTokens,
       },

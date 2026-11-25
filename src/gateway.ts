@@ -1,5 +1,6 @@
 import type { Api, Llm } from "./types";
 import type { Config } from "./config";
+import { learnedWindow } from "./compaction";
 import { headers } from "./llm/util";
 import { AnthropicLlm } from "./llm/anthropic";
 import { ResponsesLlm } from "./llm/responses";
@@ -29,6 +30,8 @@ export function contextWindow(model: string, cfg: Config = {}): number {
   const over = cfg.contextWindows ?? {};
   if (over[model]) return over[model];
   for (const [k, v] of Object.entries(over)) if (k.endsWith("*") && model.startsWith(k.slice(0, -1))) return v;
+  const seen = learnedWindow(model);
+  if (seen) return seen;
   const base = model.toLowerCase().split("/").pop()!;
   if (base.startsWith("claude-")) return 200_000;
   if (/^gpt-(5|6)/.test(base)) return 272_000;

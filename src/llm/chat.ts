@@ -45,7 +45,7 @@ export class ChatLlm implements Llm {
       ...(req.maxTokens ? { max_tokens: req.maxTokens } : {}),
     };
     // xAI routes requests with the same conversation id to the same cache.
-    const h = { ...headers(req.sessionId), ...(/(^|\/)grok-/i.test(req.model) ? { "x-grok-conv-id": req.sessionId } : {}) };
+    const h = { ...headers(req.sessionId, req.labels), ...(/(^|\/)grok-/i.test(req.model) ? { "x-grok-conv-id": req.sessionId } : {}) };
     const stream: any = await this.client.chat.completions.create(body, { headers: h, signal: req.signal });
     let text = "";
     let thinking = "";

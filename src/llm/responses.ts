@@ -52,7 +52,7 @@ export class ResponsesLlm implements Llm {
       prompt_cache_key: req.sessionId,
       parallel_tool_calls: true,
     };
-    const stream: any = await this.client.responses.create(body, { headers: headers(req.sessionId), signal: req.signal });
+    const stream: any = await this.client.responses.create(body, { headers: headers(req.sessionId, req.labels), signal: req.signal });
     let final: any = null;
     let lastSummary = -1;
     for await (const ev of stream as AsyncIterable<any>) {

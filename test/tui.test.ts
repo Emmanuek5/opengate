@@ -350,25 +350,31 @@ describe("events and queue", () => {
     expect(f).toContain("Found it");
   });
 
-  test("messages typed during a turn are queued, shown, and sent afterwards; Esc gives them back", async () => {
+  test("a message typed during a turn steers it: the model reads it before stopping", async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     const { ctl, frame, type, llm } = setup([() => ({ gate, parts: [{ type: "text", text: "first answer" }] }), () => ({ parts: [{ type: "text", text: "second answer" }] })]);
     await type("one");
     await type("\r");
-    await type("two");
+    await type("actually use tabs");
     await type("\r");
     expect(ctl.busy).toBe(true);
-    expect(frame()).toContain("queued two");
-    expect(frame()).toContain("esc to interrupt");
+    expect(frame()).toContain("actually use tabs (sent while working)");
+    expect(ctl.steerPending).toEqual(["actually use tabs"]);
     release();
-    await wait(150);
-    expect(frame()).toContain("second answer");
+    await until(() => !ctl.busy);
     expect(llm.calls.length).toBe(2);
-    expect(ctl.queue.length).toBe(0);
+    // first answer → the steering message as a user turn → second answer
+    const msgs = ctl.s.data.messages;
+    const i = msgs.findIndex((m) => m.role === "user" && m.parts.some((p: any) => p.type === "text" && p.text.includes("actually use tabs")));
+    expect(i).toBeGreaterThan(0);
+    expect(msgs[i - 1].parts.some((p: any) => p.text === "first answer")).toBe(true);
+    expect(msgs[i + 1].parts.some((p: any) => p.text === "second answer")).toBe(true);
+    expect(frame()).toContain("second answer");
+    expect(ctl.steerPending.length).toBe(0);
   });
 
-  test("Esc interrupts and returns queued text to the input", async () => {
+  test("Esc interrupts and gives unsent messages back to the input", async () => {
     const { ctl, type } = setup([(req) => ({ gate: new Promise<void>((r) => req.signal?.addEventListener("abort", () => r())), parts: [] })]);
     await type("long task");
     await type("\r");
@@ -522,5 +528,19 @@ describe("live subagent view", () => {
     await type("\r");
     await until(() => ctl.s.id === childId);
     expect(ctl.s.data.parentId).toBe(session.id);
+  });
+});
+
+describe("images", () => {
+  test("pasted [Image #n] placeholders and dropped image paths become image parts", async () => {
+    const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8ffff3f0005fe02fea7d6a0a20000000049454e44ae426082", "hex");
+    const { ctl, dir } = setup([], { files: { "shots/screen one.png": "" } });
+    writeFileSync(join(dir, "shots/screen one.png"), png);
+    writeFileSync(join(dir, "logo.png"), png);
+    ctl.images.set(1, { type: "image", mediaType: "image/png", data: "AAAA" });
+    const parts = ctl.messageParts(`look at [Image #1] and "${join(dir, "shots/screen one.png")}" and @logo.png and missing.png`);
+    expect(parts.map((p: any) => p.type)).toEqual(["text", "image", "image", "image"]);
+    expect((parts[2] as any).data).toBe(png.toString("base64"));
+    expect(ctl.images.size).toBe(0); // used up
   });
 });

@@ -63,7 +63,7 @@ export class AnthropicLlm implements Llm {
       stream: true,
       ...(modern ? { thinking: { type: "adaptive", display: "summarized" } as any, output_config: { effort: effort as any } } : {}),
     };
-    const stream = this.client.messages.stream(params, { headers: headers(req.sessionId), signal: req.signal });
+    const stream = this.client.messages.stream(params, { headers: headers(req.sessionId, req.labels), signal: req.signal });
     for await (const ev of stream) {
       if (ev.type === "content_block_delta") {
         if (ev.delta.type === "text_delta") sink.text(ev.delta.text);

@@ -1,6 +1,7 @@
 import type { Config, Mode } from "./config";
 import { apiFor, contextWindow, type Gateway } from "./gateway";
 import { COMPACT_PROMPT, systemPrompt } from "./prompt";
+import { autoCompactFor, isContextOverflow, learnWindow, parseContextLimit } from "./compaction";
 import { newId, saveSession, type SessionFile } from "./store";
 import { getPermissionPolicies, getPromptSections, getSessionHooks, getToolProviders, type AgentEvent, type PermissionVerdict } from "./ext";
 import { TOOLS, type Diff, type Tool, type ToolCtx, type ToolKind, type ToolResult } from "./tools";
@@ -62,6 +63,9 @@ export class Session {
   private started: Promise<void> | null = null;
   /** system prompt and tools are built once and kept, so the cached prefix stays identical */
   private promptReady = false;
+  /** messages the person sent while a turn was running, delivered at the next step */
+  private steering: Part[][] = [];
+  private idleWaiters: (() => void)[] = [];
   /** the tools offered in the current prompt */
   private toolset: Tool[] = TOOLS;
   /** only offer these tools (by name); undefined offers all. Not saved. */
@@ -175,6 +179,10 @@ export class Session {
   get contextSize() {
     return contextWindow(this.data.model, this.cfg);
   }
+  /** Where this session compacts: your /auto-compact setting for the model, else 80% of its window. */
+  get compactAt() {
+    return Math.min(autoCompactFor(this.cfg, this.data.model) ?? Math.round(this.contextSize * 0.8), this.contextSize);
+  }
 
   setModel(model: string) {
     this.data.model = model;
@@ -198,6 +206,35 @@ export class Session {
     this.running?.abort();
   }
 
+  /**
+   * Add a message to the running turn ("steering"). The model sees it as soon as its current
+   * tool calls finish, or before it would otherwise stop. Returns false when no turn is running
+   * (send it as a normal prompt instead).
+   */
+  steer(parts: Part[]): boolean {
+    if (!this.running || !parts.length) return false;
+    this.steering.push(parts);
+    return true;
+  }
+
+  /** Resolves when no turn is running. */
+  idle(): Promise<void> {
+    if (!this.running) return Promise.resolve();
+    return new Promise((r) => this.idleWaiters.push(r));
+  }
+
+  /** Steering messages waiting to be delivered, as parts for the next user message. */
+  private takeSteering(ui: AgentUI): Part[] {
+    if (!this.steering.length) return [];
+    const out: Part[] = [];
+    for (const parts of this.steering.splice(0)) {
+      const text = parts.filter((p) => p.type === "text").map((p: any) => p.text).join("\n").trim();
+      out.push({ type: "text", text: `[The person sent this while you were working; take it into account now:]\n${text}` }, ...parts.filter((p) => p.type !== "text"));
+      ui.event?.({ type: "steer", status: "delivered", text });
+    }
+    return out;
+  }
+
   private llm(): Llm {
     return this.gateway.llm(this.data.model);
   }
@@ -212,13 +249,16 @@ export class Session {
       await this.preparePrompt();
       const text = parts.filter((p) => p.type === "text").map((p: any) => p.text).join(" ").trim();
       if (!this.data.title && text) this.data.title = text.replace(/\s+/g, " ").slice(0, 80);
-      if (this.data.contextUsed > this.contextSize * 0.8 && this.data.messages.length >= 2) await this.compact(ui, ac.signal);
+      if (this.data.contextUsed > this.compactAt && this.data.messages.length >= 2) await this.compact(ui, ac.signal);
       this.data.messages.push({ role: "user", parts, ts: Date.now() });
       this.save();
       return await this.loop(ui, ac.signal);
     } finally {
       this.running = null;
+      // Steering that arrived too late for this turn is dropped here; front ends resend it as a prompt.
+      this.steering = [];
       this.save();
+      for (const w of this.idleWaiters.splice(0)) w();
     }
   }
 
@@ -230,19 +270,21 @@ export class Session {
   }
 
   private async loop(ui: AgentUI, signal: AbortSignal): Promise<StopReason> {
+    let overflowRetried = false;
     for (let step = 0; step < MAX_STEPS; step++) {
       if (signal.aborted) return "cancelled";
       await this.preparePrompt();
       const tools = this.toolset.map((t) => t.spec);
       // Nearly full mid-turn: summarize and carry on.
-      if (this.data.contextUsed > this.contextSize * 0.92) await this.compact(ui, signal, true);
+      // Mid-turn, allow a little past the point (finishing the step beats summarizing), never near the window's end.
+      if (this.data.contextUsed > Math.min(this.compactAt * 1.1, this.contextSize * 0.95)) await this.compact(ui, signal, true);
       ui.step?.();
       let streamed = "";
       const model = this.data.model;
       let turn;
       try {
         turn = await this.llm().turn(
-          { model, system: this.system, messages: this.data.messages, tools, effort: this.data.effort, sessionId: this.id, signal, cacheTtl: this.cfg.cacheTtl ?? "1h" },
+          { model, system: this.system, messages: this.data.messages, tools, effort: this.data.effort, sessionId: this.id, signal, cacheTtl: this.cfg.cacheTtl ?? "1h", labels: this.data.parentId ? { purpose: "subagent", parent: this.data.parentId } : { purpose: "main" } },
           {
             text: (d) => {
               streamed += d;
@@ -256,7 +298,19 @@ export class Session {
           if (streamed) this.data.messages.push({ role: "assistant", parts: [{ type: "text", text: streamed + "\n\n[interrupted]" }], ts: Date.now() });
           return "cancelled";
         }
-        throw new Error(errorText(err));
+        const msg = errorText(err);
+        // Too long for the model (an unknown window, or a large tool result): remember the
+        // limit if the error names it, compact, and try this step again once.
+        if (isContextOverflow(msg) && !overflowRetried && this.data.messages.length >= 2) {
+          overflowRetried = true;
+          const limit = parseContextLimit(msg);
+          if (limit) learnWindow(model, limit);
+          ui.notice?.(`The conversation is too long for ${model}${limit ? ` (${limit} tokens)` : ""}; compacting and trying again.`, "warn");
+          await this.compact(ui, signal, true);
+          step--;
+          continue;
+        }
+        throw new Error(msg);
       }
       const u = this.data.usage;
       u.input += turn.usage.input;
@@ -275,7 +329,16 @@ export class Session {
         return "refusal";
       }
       const calls = turn.parts.filter((p) => p.type === "tool_call") as Extract<Part, { type: "tool_call" }>[];
-      if (!calls.length) return turn.stop === "max_tokens" ? "max_tokens" : "end_turn";
+      if (!calls.length) {
+        // The person said something while the model was finishing: keep going with it.
+        const steer = this.takeSteering(ui);
+        if (steer.length && !signal.aborted) {
+          this.data.messages.push({ role: "user", parts: steer, ts: Date.now() });
+          this.save();
+          continue;
+        }
+        return turn.stop === "max_tokens" ? "max_tokens" : "end_turn";
+      }
 
       // Calls run in order, except that neighbouring parallel-safe calls (reads, searches,
       // subagents) run at the same time. Results go back in the order the model asked.
@@ -290,7 +353,8 @@ export class Session {
         batch.forEach((c, k) => results.push({ type: "tool_result", id: c.id, name: c.name, output: done[k].output, ...(done[k].isError ? { isError: true } : {}) }));
         i = j;
       }
-      this.data.messages.push({ role: "user", parts: results, ts: Date.now() });
+      // Steering goes in the same user message, after the tool results (every API accepts that).
+      this.data.messages.push({ role: "user", parts: [...results, ...(signal.aborted ? [] : this.takeSteering(ui))], ts: Date.now() });
       this.save();
       if (signal.aborted) return "cancelled";
     }
@@ -373,18 +437,35 @@ export class Session {
   async compact(ui: AgentUI, signal?: AbortSignal, midTurn = false): Promise<void> {
     if (this.data.messages.length < 2) return;
     ui.notice?.("Compacting the conversation…", "info");
-    const turn = await this.llm().turn(
-      {
-        model: this.data.model,
-        system: this.system,
-        messages: [...this.data.messages, { role: "user", parts: [{ type: "text", text: COMPACT_PROMPT }] }],
-        tools: this.toolset.map((t) => t.spec),
-        effort: "low",
-        sessionId: this.id,
-        signal,
-      },
-      { text: () => {}, thinking: () => {} },
-    );
+    // If even the summary request is too long, summarize the most recent part: halve the history
+    // (starting at a clean user message) until it fits.
+    let history = this.data.messages;
+    let turn;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        turn = await this.llm().turn(
+          {
+            model: this.data.model,
+            system: this.system,
+            messages: [...history, { role: "user", parts: [{ type: "text", text: COMPACT_PROMPT }] }],
+            tools: this.toolset.map((t) => t.spec),
+            effort: "low",
+            sessionId: this.id,
+            signal,
+            labels: { purpose: "compact" },
+          },
+          { text: () => {}, thinking: () => {} },
+        );
+        break;
+      } catch (err) {
+        const msg = errorText(err);
+        const shorter = attempt < 5 && isContextOverflow(msg) ? cleanTail(history, Math.ceil(history.length / 2)) : null;
+        if (!shorter || shorter.length >= history.length) throw new Error(msg);
+        const limit = parseContextLimit(msg);
+        if (limit) learnWindow(this.data.model, limit);
+        history = shorter;
+      }
+    }
     const summary = turn.parts.filter((p) => p.type === "text").map((p: any) => p.text).join("\n").trim();
     if (!summary) throw new Error("compaction returned no summary");
     const note = `This session was compacted. Summary of the conversation so far:\n\n${summary}${midTurn ? "\n\nContinue the task from where you left off." : ""}`;
@@ -397,6 +478,15 @@ export class Session {
     this.save();
     ui.notice?.("Conversation compacted.", "info");
   }
+}
+
+/** The last `keep` messages or fewer, starting at a user message that isn't only tool results (so no call is left without its result). */
+export function cleanTail(messages: Msg[], keep: number): Msg[] {
+  for (let i = Math.max(0, messages.length - keep); i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role === "user" && m.parts.some((p) => p.type !== "tool_result")) return messages.slice(i);
+  }
+  return [];
 }
 
 export function errorText(err: unknown): string {

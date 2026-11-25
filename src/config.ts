@@ -46,6 +46,8 @@ export interface Config {
   guardModel?: string;
   /** look for a newer release once a day and mention it at start (default true) */
   updateCheck?: boolean;
+  /** where to compact, in tokens, per model id (or "prefix*"); default 80% of the context window */
+  autoCompact?: Record<string, number>;
   /** per-project defaults, keyed by the project root (the git root above the folder, else the folder) */
   projects?: Record<string, { model?: string }>;
   /** the safety guard (built-in blocks, auto-mode review); false turns it off by default (your permissions rules still apply) */

@@ -20,8 +20,9 @@ export function userAgent(): string {
   return `opengate/${VERSION} (${surface.mode}${surface.client ? `; ${surface.client}` : ""}; ${os})`;
 }
 
-export function headers(sessionId?: string): Record<string, string> {
+export function headers(sessionId?: string, labels?: Record<string, string>): Record<string, string> {
   const h: Record<string, string> = { "User-Agent": userAgent() };
+  for (const [k, v] of Object.entries(labels ?? {})) if (v) h[`x-opengate-${k}`] = String(v).replace(/[^\x20-\x7e]/g, "").slice(0, 200);
   // Lets the gateway group a session's calls into one conversation.
   if (sessionId) h["x-session-id"] = sessionId;
   return h;

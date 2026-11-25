@@ -306,6 +306,11 @@ export function createAgent(opts: { config?: () => Config; gateway?: (cfg: Confi
         await cmd.run({ session: s, args: text.slice(1 + cmd.name.length).trim(), ui, print: (t) => ui.text(t.endsWith("\n") ? t : t + "\n") });
         return { stopReason: "end_turn" };
       }
+      // A message while a turn runs steers that turn; this request finishes with it.
+      if (s.busy && s.steer(parts)) {
+        await s.idle();
+        return { stopReason: "end_turn" };
+      }
       const hadTitle = !!s.data.title;
       const stop = await s.prompt(parts, ui);
       if (!hadTitle && s.data.title) void client.notify("session/update", { sessionId: s.id, update: { sessionUpdate: "session_info_update", title: s.data.title } }).catch(() => {});
