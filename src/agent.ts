@@ -75,7 +75,7 @@ export class Session {
 
   constructor(
     public data: SessionFile,
-    public readonly gateway: Pick<Gateway, "llm"> & Partial<Pick<Gateway, "models" | "url">>,
+    public readonly gateway: Pick<Gateway, "llm"> & Partial<Pick<Gateway, "models" | "url" | "windowFor">>,
     public readonly cfg: Config = {},
   ) {
     this.system = systemPrompt(data.cwd, new Date(data.created));
@@ -119,6 +119,10 @@ export class Session {
   /** Run the session hooks once (connect MCP servers, …). Called before the first prompt. */
   start(): Promise<void> {
     this.started ??= (async () => {
+      // Load the model list (cached) so the context window the gateway publishes is known.
+      try {
+        await this.gateway.models?.();
+      } catch {}
       for (const h of getSessionHooks()) {
         try {
           await h.start?.(this);
@@ -177,7 +181,7 @@ export class Session {
     return !!this.running;
   }
   get contextSize() {
-    return contextWindow(this.data.model, this.cfg);
+    return contextWindow(this.data.model, this.cfg, this.gateway.windowFor?.(this.data.model));
   }
   /** Where this session compacts: your /auto-compact setting for the model, else 80% of its window. */
   get compactAt() {

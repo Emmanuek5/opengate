@@ -93,7 +93,7 @@ registerCommand({
     }
     const set = autoCompactFor(session.cfg, model);
     const win = session.contextSize;
-    const src = lookup(session.cfg.contextWindows, model) ? "from your config" : learnedWindow(model) ? "learned from the provider" : "estimated";
+    const src = lookup(session.cfg.contextWindows, model) ? "from your config" : session.gateway.windowFor?.(model) ? "from the gateway" : learnedWindow(model) ? "learned from the provider" : "estimated";
     print(
       [
         `Model: ${model}`,

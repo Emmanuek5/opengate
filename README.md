@@ -54,6 +54,8 @@ irm https://raw.githubusercontent.com/Emmanuek5/opengate/main/install.ps1 | iex
 
 Each release has standalone binaries for Linux (x64, arm64), macOS (x64, arm64) and Windows (x64). You don't need Bun or Node to run them. To run from source instead: `bun install && bun src/cli.ts`.
 
+Update to the latest release at any time with `opengate update` (`--check` only reports).
+
 ## Connect to your gateway
 
 ```sh
@@ -88,24 +90,28 @@ Inside a session:
 
 | Command | What it does |
 |---|---|
-| `/model` | pick a model (filterable list of everything your key can use) |
+| `/model` | pick this session's model; `/model project` / `/model default` set what new sessions start with |
 | `/mode` | ask · auto-edit · auto · full-auto (Shift+Tab cycles) |
 | `/effort` | reasoning effort |
 | `/resume`, `/sessions` | browse and resume sessions; Tab for every folder, → to read a transcript |
 | `/memory` | list, add or forget memories |
 | `/agents`, `/skills`, `/mcp` | what's available, and MCP server status |
 | `/guard` | the safety guard's state; `/guard off`, `/guard on`, `/guard test <command>` |
+| `/subagents` | watch a subagent's chat live (Ctrl+T) |
+| `/auto-compact [180k\|off]` | where the current model's conversation gets summarized |
 | `/new`, `/compact`, `/usage`, `/help` | start fresh, summarize to free context, tokens used |
 
 | Key | Action |
 |---|---|
-| Enter | send (messages typed while it works are queued) |
+| Enter | send; while it works, your message steers the current turn (it's read at the next step) |
 | Shift+Enter, Alt+Enter, Ctrl+J | new line; pasting several lines sends them as one message |
 | Esc | stop the current turn |
 | Shift+Tab | change mode |
 | Ctrl+O | expand the last collapsed output, thinking or diff |
 | `@` / `/` | autocomplete files and commands |
 | `!command` | run a shell command directly |
+| Alt+V / Ctrl+V | paste an image from the clipboard (or drop an image file into the terminal) |
+| Ctrl+T | watch a running subagent; Enter continues the chat with it once it's done |
 | Ctrl+C twice, Ctrl+D | quit |
 
 ## Use it from T3 Code, Zed or JetBrains
@@ -239,7 +245,7 @@ The system prompt and tool list are built once per session and kept byte-identic
 - **Grok:** requests carry the session as `x-grok-conv-id`.
 - **Gateway routing:** each request sends `x-session-id`, so a gateway with session affinity keeps the conversation on one account, where its cache lives.
 
-Context windows are estimated per model family, and a conversation is compacted automatically when it nears the limit. To set exact sizes:
+Context windows come from the gateway's `/v1/models` when it publishes them (`context_length`, as CPAMC does). Otherwise opengate uses what a provider's "too long" error revealed, then a per-family estimate. A conversation is compacted at 80% of the window, or wherever `/auto-compact` puts it. If a request is still too long, opengate compacts and retries. To pin exact sizes:
 
 ```json
 { "contextWindows": { "claude-opus-5-5": 1000000, "unlid/*": 262144 } }

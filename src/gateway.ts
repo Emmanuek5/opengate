@@ -9,6 +9,24 @@ import { ChatLlm } from "./llm/chat";
 export interface GatewayModel {
   id: string;
   ownedBy: string | null;
+  /** context window and output limit, when the gateway publishes them (OpenRouter-style fields) */
+  contextWindow?: number;
+  maxOutput?: number;
+}
+
+const positive = (...vals: unknown[]): number | undefined => {
+  for (const v of vals) {
+    const n = typeof v === "string" ? Number(v) : v;
+    if (typeof n === "number" && Number.isFinite(n) && n > 0) return Math.round(n);
+  }
+  return undefined;
+};
+
+/** Limits from a /v1/models entry, in any of the common spellings. */
+export function limitsOf(m: any): { contextWindow?: number; maxOutput?: number } {
+  const contextWindow = positive(m?.context_length, m?.context_window, m?.max_input_tokens, m?.input_token_limit, m?.top_provider?.context_length, m?.limits?.context, m?.unlid?.context_length);
+  const maxOutput = positive(m?.max_output_tokens, m?.max_completion_tokens, m?.output_token_limit, m?.top_provider?.max_completion_tokens, m?.limits?.output, m?.unlid?.max_output);
+  return { ...(contextWindow ? { contextWindow } : {}), ...(maxOutput ? { maxOutput } : {}) };
 }
 
 /** Models that aren't chat models (images, video, speech) are hidden from the picker. */
@@ -25,11 +43,15 @@ export function apiFor(model: string): Api {
   return "chat";
 }
 
-/** Conservative context windows (the gateway doesn't publish them); override in config. */
-export function contextWindow(model: string, cfg: Config = {}): number {
+/**
+ * A model's context window: your config, then what the gateway publishes, then what a provider's
+ * "too long" error revealed, then a conservative per-family estimate.
+ */
+export function contextWindow(model: string, cfg: Config = {}, fromGateway?: number): number {
   const over = cfg.contextWindows ?? {};
   if (over[model]) return over[model];
   for (const [k, v] of Object.entries(over)) if (k.endsWith("*") && model.startsWith(k.slice(0, -1))) return v;
+  if (fromGateway) return fromGateway;
   const seen = learnedWindow(model);
   if (seen) return seen;
   const base = model.toLowerCase().split("/").pop()!;
@@ -55,11 +77,16 @@ export class Gateway {
     if (!r.ok) throw new Error(`the gateway answered ${r.status} for /v1/models`);
     const j: any = await r.json();
     const models = (Array.isArray(j?.data) ? j.data : [])
-      .map((m: any) => ({ id: String(m?.id ?? ""), ownedBy: m?.owned_by ? String(m.owned_by) : null }))
+      .map((m: any) => ({ id: String(m?.id ?? ""), ownedBy: m?.owned_by ? String(m.owned_by) : null, ...limitsOf(m) }))
       .filter((m: GatewayModel) => m.id && !NOT_CHAT.test(m.id))
       .sort((a: GatewayModel, b: GatewayModel) => a.id.localeCompare(b.id));
     this.cache = { at: Date.now(), models };
     return models;
+  }
+
+  /** The window the gateway published for a model (from the last model list), if any. */
+  windowFor(model: string): number | undefined {
+    return this.cache?.models.find((m) => m.id === model)?.contextWindow;
   }
 
   llm(model: string): Llm {

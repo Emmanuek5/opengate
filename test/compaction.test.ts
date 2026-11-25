@@ -66,3 +66,17 @@ test("/auto-compact sets the point per model; cleanTail keeps calls with their r
   expect(cleanTail(msgs, 3).map((m) => m.parts[0].type)).toEqual(["text"]); // skips the orphaned tool_result
   expect(cleanTail(msgs, 5)).toHaveLength(5);
 });
+
+test("the gateway's published windows are read in every common spelling and used", async () => {
+  const { limitsOf, contextWindow } = await import("../src/gateway");
+  expect(limitsOf({ id: "a", context_length: 200000, max_output_tokens: 64000 })).toEqual({ contextWindow: 200000, maxOutput: 64000 });
+  expect(limitsOf({ id: "b", top_provider: { context_length: "262144", max_completion_tokens: 16384 } })).toEqual({ contextWindow: 262144, maxOutput: 16384 });
+  expect(limitsOf({ id: "c", max_input_tokens: 1000000 })).toEqual({ contextWindow: 1000000 });
+  expect(limitsOf({ id: "d" })).toEqual({});
+  expect(contextWindow("x-model", {}, 300000)).toBe(300000); // gateway beats the estimate
+  expect(contextWindow("x-model", { contextWindows: { "x-model": 50000 } }, 300000)).toBe(50000); // your config beats the gateway
+  const gw: any = { llm: () => ({}), models: async () => [{ id: "unlid/big", ownedBy: null, contextWindow: 1048576 }], windowFor: (m: string) => (m === "unlid/big" ? 1048576 : undefined) };
+  const s = Session.create(gw, {}, { cwd: process.env.OPENGATE_HOME!, model: "unlid/big" });
+  expect(s.contextSize).toBe(1048576);
+  expect(s.compactAt).toBe(Math.round(1048576 * 0.8));
+});
