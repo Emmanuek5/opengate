@@ -507,7 +507,7 @@ function InputBox({ ctl }: { ctl: Controller }) {
   const t = ctl.ed.text;
   const shell = t.startsWith("!");
   const cmd = t.startsWith("/");
-  const placeholder = ctl.busy ? "Type to queue a message…" : "Ask anything · / commands · @ files · ! shell";
+  const placeholder = ctl.busy ? "Type to steer the agent (it reads it at its next step)…" : "Ask anything · / commands · @ files · ! shell";
   const lines = inputLines(ctl.ed, placeholder);
   const accent = shell ? P.pink : cmd ? P.indigo : P.teal;
   return (
@@ -736,7 +736,7 @@ function Working({ ctl, frame }: { ctl: Controller; frame: number }) {
         {glow}
         <Text color={P.dim}>
           {" "}
-          ({fmtDuration(Date.now() - ctl.turnStart)} · esc to interrupt)
+          ({fmtDuration(Date.now() - ctl.turnStart)} · {ctl.steerPending.length && ctl.s.toolsRunning ? "your message waits for this tool · esc to stop it and send now" : "esc to interrupt"})
         </Text>
       </Text>
     </Box>

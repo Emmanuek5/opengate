@@ -1,6 +1,6 @@
 {
   "name": "opengate",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "A coding agent for your AI gateway: an interactive terminal agent and an ACP agent for T3 Code, Zed and JetBrains, using any model your gateway offers.",
   "type": "module",
   "license": "MIT",

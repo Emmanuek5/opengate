@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { Llm, LlmRequest, LlmSink, LlmTurn, Msg, Part, StopKind } from "../types";
-import { jsonOr, headers } from "./util";
+import { jsonOr, headers, pairToolCalls } from "./util";
 
 /** Claude models with adaptive thinking and effort (4.6 and later, the 5 family, Fable, Mythos). */
 export function modernClaude(model: string): boolean {
@@ -19,7 +19,7 @@ export function canDisableThinking(model: string): boolean {
 
 export function toAnthropic(model: string, messages: Msg[]): Anthropic.MessageParam[] {
   const out: Anthropic.MessageParam[] = [];
-  for (const m of messages) {
+  for (const m of pairToolCalls(messages)) {
     if (m.role === "assistant") {
       // Same model and API: send the answer back exactly as it came (thinking blocks included).
       if (m.native?.api === "anthropic" && m.native.model === model && Array.isArray(m.native.data)) {

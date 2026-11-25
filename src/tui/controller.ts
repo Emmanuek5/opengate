@@ -143,7 +143,7 @@ export const KEYS: [string, string][] = [
   ["Up / Down", "history (or move between lines)"],
   ["Tab / Enter", "accept a suggestion (/ commands, @ files)"],
   ["Shift+Tab", "cycle mode: ask → auto-edit → auto → full-auto"],
-  ["Esc", "interrupt the agent · close a popup"],
+  ["Esc", "interrupt the agent · with a message waiting, stop just the running tool so it's read now · close a popup"],
   ["Ctrl+O", "expand the last collapsed output"],
   ["Ctrl+T", "watch a subagent's chat live"],
   ["Alt+V · Ctrl+V", "paste an image from the clipboard (or drop an image file's path in)"],
@@ -510,7 +510,14 @@ export class Controller implements AgentUI {
         this.popupDismissed = ed.text;
         return this.changed(true);
       }
-      if (this.busy) return this.interrupt();
+      if (this.busy) {
+        // A message is waiting for a running tool: stop just the tool so the model reads it now.
+        if (this.steerPending.length && this.s.stopTools()) {
+          this.activity = "Stopping the tool to read your message";
+          return this.flashHint("Stopped the running tool; the agent reads your message now · Esc again to interrupt");
+        }
+        return this.interrupt();
+      }
       return;
     }
     if (popup) {

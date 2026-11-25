@@ -105,7 +105,7 @@ Inside a session:
 |---|---|
 | Enter | send; while it works, your message steers the current turn (it's read at the next step) |
 | Shift+Enter, Alt+Enter, Ctrl+J | new line; pasting several lines sends them as one message |
-| Esc | stop the current turn |
+| Esc | stop the current turn; if a message you sent is waiting on a running command, stop just that command so the agent reads it now |
 | Shift+Tab | change mode |
 | Ctrl+O | expand the last collapsed output, thinking or diff |
 | `@` / `/` | autocomplete files and commands |

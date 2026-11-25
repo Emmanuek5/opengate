@@ -386,6 +386,37 @@ describe("events and queue", () => {
     expect(ctl.ed.text).toBe("later");
   });
 
+  test("with a message waiting on a running tool, Esc stops just the tool and the turn goes on", async () => {
+    ext.registerToolProvider({
+      name: "tui-wait-tool",
+      tools: () => [
+        {
+          spec: { name: "wait_forever", description: "test", parameters: { type: "object", properties: {} } },
+          kind: "read" as const,
+          asks: () => false,
+          title: () => "wait forever",
+          paths: () => [],
+          run: (_i: any, ctx: any) => new Promise((r) => ctx.signal?.addEventListener("abort", () => r({ output: "(cancelled)" }))),
+        },
+      ],
+    });
+    const { ctl, type, frame, llm } = setup([() => ({ parts: [{ type: "tool_call", id: "w", name: "wait_forever", input: {} }] }), () => ({ parts: [{ type: "text", text: "on it" }] })]);
+    await type("go");
+    await type("\r");
+    await until(() => ctl.s.toolsRunning);
+    await type("you got stuck");
+    await type("\r");
+    expect(frame()).toContain("esc to stop it and send now");
+    await type("\x1b");
+    await until(() => !ctl.busy);
+    expect(llm.calls.length).toBe(2);
+    const back = ctl.s.data.messages.find((m) => m.parts.some((p: any) => p.type === "tool_result"))!;
+    expect(back.parts.map((p: any) => p.type)).toEqual(["tool_result", "text"]);
+    expect(JSON.stringify(back)).toContain("you got stuck");
+    await until(() => frame().includes("on it"));
+    expect(ctl.ed.text).toBe("");
+  });
+
   test("Shift+Tab cycles modes and the status bar shows mode, context and tokens", async () => {
     const { ctl, type, frame, session } = setup();
     expect(frame()).toContain("claude-sonnet-5-5 · ask · effort auto");

@@ -13,7 +13,9 @@ const { apiFor } = await import("../src/gateway");
 const { toAnthropic } = await import("../src/llm/anthropic");
 const { toResponsesInput } = await import("../src/llm/responses");
 const { toChat } = await import("../src/llm/chat");
-const { applyEdit, applyEdits, toolByName } = await import("../src/tools");
+const { applyEdit, applyEdits, toolByName, runProcess } = await import("../src/tools");
+const { untilStopped } = await import("../src/agent");
+const { pairToolCalls, LOST_RESULT } = await import("../src/llm/util");
 const { parseArgs } = await import("../src/cli-args");
 const ext = await import("../src/ext");
 import type { Llm, LlmRequest, LlmTurn, Msg } from "../src/types";
@@ -212,6 +214,101 @@ describe("steering", () => {
     expect((msg.parts[1] as any).text).toContain("also check b.txt");
     expect(events).toContainEqual(expect.objectContaining({ type: "steer", status: "delivered" }));
     expect(s.steer([{ type: "text", text: "late" }])).toBe(false); // no turn running
+  });
+});
+
+describe("a stuck tool doesn't hold the turn", () => {
+  // A child that starts a grandchild sharing its output pipe (like `cmd &` or Start-Process
+  // -NoNewWindow), prints the grandchild's pid, then exits or waits.
+  const spawner = (parentWaits: boolean) =>
+    `const c=require("child_process").spawn(process.execPath,["-e","setTimeout(()=>{},30000)"],{stdio:"inherit",detached:true});c.unref();console.log("pid",c.pid);${parentWaits ? "setTimeout(()=>{},30000)" : ""}`;
+  const reap = (out: string) => {
+    const pid = Number(out.match(/pid (\d+)/)?.[1]);
+    try {
+      if (pid) process.kill(pid);
+    } catch {}
+  };
+
+  test("ends when the command exits, even if a process it started keeps the output open", async () => {
+    const t = Date.now();
+    const r = await runProcess(process.execPath, ["-e", spawner(false)], dir, 60_000);
+    reap(r.out);
+    expect(Date.now() - t).toBeLessThan(10_000);
+    expect(r).toMatchObject({ code: 0, timedOut: false, leftRunning: true });
+    expect(r.out).toContain("pid");
+  });
+
+  test("a timeout ends it even when the kill can't reach the process holding the output", async () => {
+    const t = Date.now();
+    const r = await runProcess(process.execPath, ["-e", spawner(true)], dir, 500);
+    reap(r.out);
+    expect(Date.now() - t).toBeLessThan(10_000);
+    expect(r.timedOut).toBe(true);
+  });
+
+  test("a tool that ignores the stop signal is given up on after a grace period", async () => {
+    const ac = new AbortController();
+    const p = untilStopped(new Promise(() => {}), ac.signal, 20);
+    ac.abort();
+    expect((await p).output).toContain("may still be running");
+    expect(await untilStopped(Promise.resolve({ output: "fine" }), new AbortController().signal)).toEqual({ output: "fine" });
+  });
+
+  test("stopping the running tool keeps the turn going and delivers the waiting message", async () => {
+    ext.registerToolProvider({
+      name: "stuck-tools",
+      tools: () => [
+        {
+          spec: { name: "hang", description: "test", parameters: { type: "object", properties: {} } },
+          kind: "read" as const,
+          asks: () => false,
+          title: () => "hang",
+          paths: () => [],
+          run: () => new Promise(() => {}), // ignores the signal, never ends
+        },
+      ],
+    });
+    let s: any;
+    const llm = new FakeLlm([
+      () => ({ parts: [{ type: "tool_call", id: "h", name: "hang", input: {} }] }),
+      () => ({ parts: [{ type: "text", text: "redirected" }] }),
+    ]);
+    s = Session.create({ llm: () => llm }, {}, { cwd: dir, model: "m" });
+    const done = s.prompt([{ type: "text", text: "go" }], ui());
+    while (!s.toolsRunning) await Bun.sleep(5);
+    expect(s.steer([{ type: "text", text: "you got stuck" }])).toBe(true);
+    expect(s.stopTools()).toBe(true);
+    expect(await done).toBe("end_turn");
+    const msg = llm.calls[1].messages.at(-1)!;
+    expect(msg.parts.map((p: any) => p.type)).toEqual(["tool_result", "text"]);
+    expect((msg.parts[0] as any).output).toContain("stopped this call to redirect you");
+    expect((msg.parts[1] as any).text).toContain("you got stuck");
+    expect(s.stopTools()).toBe(false); // nothing running now
+  }, 15_000);
+
+  test("a session saved mid-tool (calls without results) still works", () => {
+    const call = (id: string) => ({ type: "tool_call" as const, id, name: "shell", input: {} });
+    const msgs: Msg[] = [
+      { role: "user", parts: [{ type: "text", text: "go" }] },
+      { role: "assistant", parts: [call("a"), call("b")] },
+      { role: "user", parts: [{ type: "text", text: "you got stuck" }] },
+      { role: "assistant", parts: [{ type: "text", text: "sorry" }] },
+      { role: "user", parts: [{ type: "tool_result", id: "zz", name: "shell", output: "stray" }, { type: "text", text: "next" }] },
+      { role: "assistant", parts: [call("c")] },
+    ];
+    const fixed = pairToolCalls(msgs);
+    expect(fixed[2].parts.map((p: any) => p.id ?? p.text)).toEqual(["a", "b", "you got stuck"]);
+    expect((fixed[2].parts[0] as any).output).toBe(LOST_RESULT);
+    expect(fixed[4].parts.map((p: any) => p.type)).toEqual(["text"]);
+    expect(fixed.at(-1)!.parts.map((p: any) => p.id)).toEqual(["c"]);
+    expect(msgs[2].parts.length).toBe(1); // the saved session isn't changed
+    const ok: Msg[] = [msgs[0], { role: "assistant", parts: [call("x")] }, { role: "user", parts: [{ type: "tool_result", id: "x", name: "shell", output: "1" }] }];
+    expect(pairToolCalls(ok)).toBe(ok);
+    // and every API format gets the pairs
+    const claude = toAnthropic("claude-opus-5-5", msgs) as any[];
+    expect(claude[2].content.map((b: any) => b.type)).toEqual(["tool_result", "tool_result", "text"]);
+    expect(toChat("sys", msgs).filter((m: any) => m.role === "tool").map((m: any) => m.tool_call_id)).toEqual(["a", "b", "c"]);
+    expect(toResponsesInput("gpt-6.2-sol", msgs).filter((m: any) => m.type === "function_call_output").map((m: any) => m.call_id)).toEqual(["a", "b", "c"]);
   });
 });
 

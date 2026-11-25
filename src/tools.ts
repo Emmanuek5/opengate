@@ -405,11 +405,36 @@ export function shellCommand(command: string): { file: string; args: string[]; n
   return { file: bash ?? "/bin/sh", args: ["-c", command], name: bash ? "bash" : "sh" };
 }
 
-export function runProcess(file: string, args: string[], cwd: string, timeoutMs: number, signal?: AbortSignal): Promise<{ out: string; code: number | null; timedOut: boolean; cancelled: boolean }> {
+/** How long to keep reading after the command exits, for output still in the pipe. */
+const EXIT_GRACE_MS = 2000;
+/** How long to wait for a killed command's pipes to close before giving up on them. */
+const KILL_GRACE_MS = 5000;
+
+export interface ProcessResult {
+  out: string;
+  code: number | null;
+  timedOut: boolean;
+  cancelled: boolean;
+  /** the command exited, but something it started still holds its output open (a server, Start-Process) */
+  leftRunning: boolean;
+}
+
+/**
+ * Run a command and collect its output. Ends when the command exits, not when its output closes:
+ * a process it starts in the background (`cmd &`, Start-Process) inherits the output pipe and can
+ * keep it open forever. A timeout or abort kills the process tree and gives up on the pipes soon
+ * after, even if a stray child (whose parent already exited, so taskkill /T can't find it) holds them.
+ */
+export function runProcess(file: string, args: string[], cwd: string, timeoutMs: number, signal?: AbortSignal): Promise<ProcessResult> {
   return new Promise((res) => {
     let out = "";
     let timedOut = false;
     let cancelled = false;
+    let leftRunning = false;
+    let exitCode: number | null = null;
+    let done = false;
+    let grace: ReturnType<typeof setTimeout> | undefined;
+    let hard: ReturnType<typeof setTimeout> | undefined;
     const child = spawn(file, args, { cwd, env: { ...process.env, OPENGATE: "1", PAGER: "cat", GIT_PAGER: "cat" }, detached: !isWin, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     const add = (d: Buffer) => {
       out += d.toString("utf8");
@@ -417,13 +442,27 @@ export function runProcess(file: string, args: string[], cwd: string, timeoutMs:
     };
     child.stdout?.on("data", add);
     child.stderr?.on("data", add);
+    const finish = (code: number | null, extra = "") => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      clearTimeout(grace);
+      clearTimeout(hard);
+      signal?.removeEventListener("abort", onAbort);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      res({ out: out + extra, code, timedOut, cancelled, leftRunning });
+    };
     const kill = () => {
       try {
         if (isWin) spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
         else process.kill(-child.pid!, "SIGKILL");
       } catch {
-        child.kill("SIGKILL");
+        try {
+          child.kill("SIGKILL");
+        } catch {}
       }
+      hard ??= setTimeout(() => finish(exitCode), KILL_GRACE_MS);
     };
     const timer = setTimeout(() => {
       timedOut = true;
@@ -433,16 +472,17 @@ export function runProcess(file: string, args: string[], cwd: string, timeoutMs:
       cancelled = true;
       kill();
     };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    child.on("error", (e) => {
-      clearTimeout(timer);
-      res({ out: `${out}${e.message}`, code: null, timedOut, cancelled });
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+    child.on("error", (e) => finish(null, e.message));
+    child.on("exit", (code) => {
+      exitCode = code;
+      grace ??= setTimeout(() => {
+        leftRunning = true;
+        finish(code);
+      }, EXIT_GRACE_MS);
     });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      res({ out, code, timedOut, cancelled });
-    });
+    child.on("close", (code) => finish(code ?? exitCode));
   });
 }
 
@@ -474,6 +514,8 @@ const bashTool: Tool = {
     let output = clip(r.out.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ""));
     if (r.timedOut) output += `\n(timed out after ${Math.round(timeout / 1000)} s and was stopped)`;
     if (r.cancelled) output += "\n(cancelled)";
+    if (r.leftRunning && !r.timedOut && !r.cancelled)
+      output += "\n(the command finished, but a process it started is still running and holding its output open; opengate stopped waiting for it. Start servers with their output sent to a file, and stop them when you're done.)";
     output += `\nexit code: ${r.code ?? "none"}`;
     return { output: output.trim(), isError: r.code !== 0, exitCode: r.code };
   },

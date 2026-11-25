@@ -66,6 +66,8 @@ export class Session {
   private promptReady = false;
   /** messages the person sent while a turn was running, delivered at the next step */
   private steering: Part[][] = [];
+  /** Stops the tool calls running in this step, without ending the turn. */
+  private toolStop: AbortController | null = null;
   private idleWaiters: (() => void)[] = [];
   /** the tools offered in the current prompt */
   private toolset: Tool[] = TOOLS;
@@ -220,6 +222,22 @@ export class Session {
     if (!this.running || !parts.length) return false;
     this.steering.push(parts);
     return true;
+  }
+
+  /**
+   * Stop the tool calls running now without ending the turn: they come back to the model as
+   * stopped, and it carries on with any steering. For "I sent a message, don't make me wait for
+   * that command". False when no tool is running.
+   */
+  stopTools(): boolean {
+    if (!this.toolStop || this.toolStop.signal.aborted) return false;
+    this.toolStop.abort();
+    return true;
+  }
+
+  /** Whether tool calls are running right now. */
+  get toolsRunning(): boolean {
+    return !!this.toolStop && !this.toolStop.signal.aborted;
   }
 
   /** Resolves when no turn is running. */
@@ -388,13 +406,20 @@ export class Session {
       const results: Part[] = [];
       const byName = new Map(this.toolset.map((t) => [t.spec.name, t]));
       const cutOff = turn.stop === "max_tokens";
-      for (let i = 0; i < calls.length; ) {
-        let j = i + 1;
-        if (byName.get(calls[i].name)?.parallel) while (j < calls.length && byName.get(calls[j].name)?.parallel) j++;
-        const batch = calls.slice(i, j);
-        const done = await Promise.all(batch.map((c) => this.runTool(c, ui, signal, cutOff)));
-        batch.forEach((c, k) => results.push({ type: "tool_result", id: c.id, name: c.name, output: done[k].output, ...(done[k].isError ? { isError: true } : {}) }));
-        i = j;
+      const stop = new AbortController();
+      this.toolStop = stop;
+      const toolSignal = AbortSignal.any([signal, stop.signal]);
+      try {
+        for (let i = 0; i < calls.length; ) {
+          let j = i + 1;
+          if (byName.get(calls[i].name)?.parallel) while (j < calls.length && byName.get(calls[j].name)?.parallel) j++;
+          const batch = calls.slice(i, j);
+          const done = await Promise.all(batch.map((c) => this.runTool(c, ui, toolSignal, cutOff, () => stop.signal.aborted && !signal.aborted)));
+          batch.forEach((c, k) => results.push({ type: "tool_result", id: c.id, name: c.name, output: done[k].output, ...(done[k].isError ? { isError: true } : {}) }));
+          i = j;
+        }
+      } finally {
+        this.toolStop = null;
       }
       // Steering goes in the same user message, after the tool results (every API accepts that).
       this.data.messages.push({ role: "user", parts: [...results, ...(signal.aborted ? [] : this.takeSteering(ui))], ts: Date.now() });
@@ -404,7 +429,7 @@ export class Session {
     return "max_turn_requests";
   }
 
-  private async runTool(c: Extract<Part, { type: "tool_call" }>, ui: AgentUI, signal: AbortSignal, cutOff: boolean): Promise<ToolResult> {
+  private async runTool(c: Extract<Part, { type: "tool_call" }>, ui: AgentUI, signal: AbortSignal, cutOff: boolean, stoppedByPerson = () => false): Promise<ToolResult> {
     const tool = this.toolset.find((t) => t.spec.name === c.name);
     const input: any = c.input && typeof c.input === "object" ? c.input : {};
     let title = c.name;
@@ -418,10 +443,11 @@ export class Session {
     const info: ToolCallInfo = { id: c.id, name: c.name, input, title, kind: tool?.kind ?? "other", paths };
     ui.toolStart(info);
     const done = (r: ToolResult) => {
+      if (stoppedByPerson()) r = { ...r, output: `${r.output}\n(The person stopped this call to redirect you; read their message.)`.trim(), isError: true };
       ui.toolEnd(info, r);
       return r;
     };
-    if (signal.aborted) return done({ output: "Cancelled by the person before it ran.", isError: true });
+    if (signal.aborted) return done({ output: stoppedByPerson() ? "Not run." : "Cancelled by the person before it ran.", isError: true });
     if (!tool) return done({ output: `There is no tool called ${c.name}. Available: ${this.toolset.map((t) => t.spec.name).join(", ")}.`, isError: true });
     if (cutOff) return done({ output: "Your answer was cut off (output token limit), so this call didn't run. Do the work in smaller steps.", isError: true });
     if ("_raw" in input) return done({ output: "The arguments were not valid JSON, so this call didn't run.", isError: true });
@@ -429,7 +455,7 @@ export class Session {
     const denied = await this.permit(tool, info, ctx, ui, signal);
     if (denied) return done({ output: denied, isError: true });
     try {
-      return done(await tool.run(input, ctx));
+      return done(await untilStopped(tool.run(input, ctx), signal));
     } catch (err) {
       return done({ output: `Error: ${(err as Error)?.message ?? err}`, isError: true });
     }
@@ -583,4 +609,35 @@ export function errorText(err: unknown): string {
   if (status === 401) return `The gateway rejected the key (401). Run \`opengate login\` again. ${msg}`;
   if (status === 429) return `Rate limited (429): ${msg}`;
   return status ? `${status}: ${msg}` : msg;
+}
+
+/** How long a stopped tool gets to wind down before we stop waiting for it. */
+const STOP_GRACE_MS = 3000;
+
+/**
+ * A tool's result, or, once the signal fires and the tool still hasn't returned a few seconds
+ * later, a stand-in: a tool that ignores the signal (or a process that won't die) must not hold
+ * the turn, and with it the person's interrupt or steering message, forever.
+ */
+export function untilStopped(run: Promise<ToolResult>, signal: AbortSignal, graceMs = STOP_GRACE_MS): Promise<ToolResult> {
+  return new Promise((res, rej) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = () => {
+      timer = setTimeout(() => res({ output: "(stopped; it didn't finish winding down and may still be running in the background)", isError: true }), graceMs);
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+    run.then(
+      (r) => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        res(r);
+      },
+      (e) => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        rej(e);
+      },
+    );
+  });
 }

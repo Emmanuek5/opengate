@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import type { Llm, LlmRequest, LlmSink, LlmTurn, Msg, Part } from "../types";
-import { dataUrl, jsonOr, headers } from "./util";
+import { dataUrl, jsonOr, headers, pairToolCalls } from "./util";
 
 /** Output items are replayed without their ids (nothing is stored server-side); reasoning keeps its encrypted content. */
 function replayItem(it: any): any {
@@ -11,7 +11,7 @@ function replayItem(it: any): any {
 
 export function toResponsesInput(model: string, messages: Msg[]): any[] {
   const out: any[] = [];
-  for (const m of messages) {
+  for (const m of pairToolCalls(messages)) {
     if (m.role === "assistant") {
       if (m.native?.api === "responses" && m.native.model === model && Array.isArray(m.native.data)) {
         for (const it of m.native.data as any[]) out.push(replayItem(it));

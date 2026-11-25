@@ -1,11 +1,11 @@
 import OpenAI from "openai";
 import type { Llm, LlmRequest, LlmSink, LlmTurn, Msg, Part } from "../types";
-import { dataUrl, jsonOr, headers } from "./util";
+import { dataUrl, jsonOr, headers, pairToolCalls } from "./util";
 
 /** Chat Completions: the format every OpenAI-compatible provider speaks (OpenRouter, Unlid, Grok, …). */
 export function toChat(system: string, messages: Msg[]): any[] {
   const out: any[] = [{ role: "system", content: system }];
-  for (const m of messages) {
+  for (const m of pairToolCalls(messages)) {
     if (m.role === "assistant") {
       const text = m.parts.filter((p) => p.type === "text").map((p: any) => p.text).join("");
       const calls = m.parts.filter((p) => p.type === "tool_call") as Extract<Part, { type: "tool_call" }>[];
