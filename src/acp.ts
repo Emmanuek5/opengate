@@ -254,7 +254,8 @@ export function createAgent(opts: { config?: () => Config; gateway?: (cfg: Confi
           promptCapabilities: { image: true, embeddedContext: true },
           sessionCapabilities: { list: {} },
         },
-        authMethods: cfg.url && cfg.key ? [] : [{ id: "opengate-login", name: "Log in to your gateway", description: "Run `opengate login` in a terminal, then start a new session." }],
+        // Always offered (the ACP Registry requires it): the client runs `opengate login` in a terminal.
+        authMethods: [{ type: "terminal", id: "opengate-login", name: "Log in to your gateway", description: "Asks for your gateway URL and API key in a terminal and saves them.", args: ["login"] }] as any,
       };
     })
     .onRequest("authenticate", () => {

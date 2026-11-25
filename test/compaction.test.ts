@@ -115,3 +115,38 @@ test("compaction: Haiku summarizes, falls back to the session's model if it refu
   await s2.compact(ui());
   expect(asked).toEqual(["unlid/x"]);
 });
+
+test("idle compaction: after the cache has expired, a big conversation is summarized before the next message", async () => {
+  let compactions = 0;
+  const llm: Llm = {
+    async turn(req): Promise<LlmTurn> {
+      const last = req.messages.at(-1)!.parts[0] as any;
+      if (last?.text?.startsWith("Summarize this conversation")) {
+        compactions++;
+        return { parts: [{ type: "text", text: "IDLE SUMMARY" }], native: null, stop: "end", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } };
+      }
+      return { parts: [{ type: "text", text: "ok" }], native: null, stop: "end", usage: { input: 60_000, output: 5, cacheRead: 0, cacheWrite: 0 } };
+    },
+  };
+  const s = Session.create({ llm: () => llm }, {}, { cwd: process.env.OPENGATE_HOME!, model: "claude-opus-5-5" });
+  await s.prompt([{ type: "text", text: "one" }], ui());
+  expect(s.idleCompactionDue()).toBeNull(); // just used
+  const twoHoursAgo = Date.now() - 2 * 3600_000;
+  for (const m of s.data.messages) m.ts = twoHoursAgo;
+  expect(s.idleCompactionDue()).toBe("2 h");
+  const u = ui();
+  await s.prompt([{ type: "text", text: "back again" }], u);
+  expect(compactions).toBe(1);
+  expect(u.notices.some((n) => n.includes("idle for 2 h"))).toBe(true);
+  expect((s.data.messages[0].parts[0] as any).text).toContain("IDLE SUMMARY");
+
+  // small conversations and "false" are left alone
+  const small = Session.create({ llm: () => llm }, { idleCompaction: { minTokens: 100_000 } }, { cwd: process.env.OPENGATE_HOME!, model: "claude-opus-5-5" });
+  await small.prompt([{ type: "text", text: "x" }], ui());
+  for (const m of small.data.messages) m.ts = twoHoursAgo;
+  expect(small.idleCompactionDue()).toBeNull();
+  const off = Session.create({ llm: () => llm }, { idleCompaction: false }, { cwd: process.env.OPENGATE_HOME!, model: "claude-opus-5-5" });
+  await off.prompt([{ type: "text", text: "x" }], ui());
+  for (const m of off.data.messages) m.ts = twoHoursAgo;
+  expect(off.idleCompactionDue()).toBeNull();
+});

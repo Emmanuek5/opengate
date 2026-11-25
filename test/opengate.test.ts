@@ -302,7 +302,7 @@ describe("ACP", () => {
     const clientApp = acp.client({ name: "test" });
     await clientApp.connectWith(agentApp as any, async (agent) => {
       const init = await agent.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
-      expect(init.authMethods?.[0]?.id).toBe("opengate-login");
+      expect(init.authMethods?.[0]).toMatchObject({ id: "opengate-login", type: "terminal", args: ["login"] });
       await expect(agent.request("session/new", { cwd: dir, mcpServers: [] })).rejects.toThrow();
     });
   });

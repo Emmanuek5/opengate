@@ -254,6 +254,17 @@ export class Session {
       const text = parts.filter((p) => p.type === "text").map((p: any) => p.text).join(" ").trim();
       if (!this.data.title && text) this.data.title = text.replace(/\s+/g, " ").slice(0, 80);
       if (this.data.contextUsed > this.compactAt && this.data.messages.length >= 2) await this.compact(ui, ac.signal);
+      else {
+        const idle = this.idleCompactionDue();
+        if (idle) {
+          ui.notice?.(`This session was idle for ${idle}, so its prompt cache has expired; compacting first so the conversation isn't re-read at full price.`, "info");
+          try {
+            await this.compact(ui, ac.signal);
+          } catch (e) {
+            ui.notice?.(`Couldn't compact (${(e as Error).message}); continuing with the full conversation.`, "warn");
+          }
+        }
+      }
       this.data.messages.push({ role: "user", parts, ts: Date.now() });
       this.save();
       return await this.loop(ui, ac.signal);
@@ -264,6 +275,22 @@ export class Session {
       this.save();
       for (const w of this.idleWaiters.splice(0)) w();
     }
+  }
+
+  /** If the session sat idle past its cache's lifetime with a big conversation: how long (e.g. "2 h"); else null. */
+  idleCompactionDue(now = Date.now()): string | null {
+    const opt = this.cfg.idleCompaction;
+    if (opt === false || this.data.messages.length < 2) return null;
+    const last = [...this.data.messages].reverse().find((m) => m.ts)?.ts;
+    if (!last) return null;
+    const claude = apiFor(this.data.model) === "anthropic";
+    const cacheMinutes = claude ? ((this.cfg.cacheTtl ?? "1h") === "1h" ? 60 : 5) : 30;
+    const afterMs = (opt?.afterMinutes ?? cacheMinutes) * 60_000;
+    const minTokens = opt?.minTokens ?? 40_000;
+    const idle = now - last;
+    if (idle < afterMs || this.data.contextUsed < minTokens) return null;
+    const mins = Math.round(idle / 60_000);
+    return mins >= 120 ? `${Math.round(mins / 60)} h` : `${mins} min`;
   }
 
   private async preparePrompt(): Promise<void> {

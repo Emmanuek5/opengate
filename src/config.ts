@@ -46,6 +46,12 @@ export interface Config {
   guardModel?: string;
   /** look for a newer release once a day and mention it at start (default true) */
   updateCheck?: boolean;
+  /**
+   * Compact before the next message when the session sat idle past the prompt cache's lifetime
+   * and the conversation is big (re-reading it uncached would cost more than a summary).
+   * Defaults: 60 min for Claude (1-hour cache), 30 min otherwise, 40k tokens. false turns it off.
+   */
+  idleCompaction?: false | { afterMinutes?: number; minTokens?: number };
   /** the model that writes compaction summaries (default claude-haiku-5-5; falls back to the session's model if it refuses or fails); "same" always uses the session's model */
   compactModel?: string;
   /** where to compact, in tokens, per model id (or "prefix*"); default 80% of the context window */
