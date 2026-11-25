@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { existsSync, statSync } from "node:fs";
+import { existsSync, rmSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import type { Session } from "./agent";
@@ -170,6 +170,14 @@ async function updateCommand(a: Args) {
 }
 
 async function main() {
+  // A Windows self-update leaves the previous exe as opengate.exe.old (a running exe can't be
+  // deleted); remove it on any start, even --version.
+  const old = `${process.execPath}.old`;
+  if (existsSync(old)) {
+    try {
+      rmSync(old, { force: true });
+    } catch {}
+  }
   let a: Args;
   try {
     a = parseArgs(process.argv.slice(2));
@@ -179,7 +187,6 @@ async function main() {
   }
   if (a.cmd === "help") return void process.stdout.write(HELP);
   if (a.cmd === "version") return void console.log(VERSION);
-  (await import("./update")).cleanupOldBinary();
   if (a.cmd === "update") return updateCommand(a);
   if (a.cmd === "acp") return (await import("./acp")).runAcp();
   if (a.cmd === "login") return login(a);
