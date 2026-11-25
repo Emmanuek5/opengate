@@ -41,10 +41,21 @@ export function assetName(platform = process.platform, arch = process.arch): str
 }
 
 export async function latestRelease(fetchImpl: typeof fetch = fetch): Promise<Release> {
-  const r = await fetchImpl(`https://api.github.com/repos/${REPO()}/releases/latest`, {
-    headers: { Accept: "application/vnd.github+json", "User-Agent": `opengate/${VERSION}` },
-    signal: AbortSignal.timeout(15_000),
-  });
+  let r: Response | null = null;
+  // GitHub's API has the odd 5xx; try a few times before giving up.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      r = await fetchImpl(`https://api.github.com/repos/${REPO()}/releases/latest`, {
+        headers: { Accept: "application/vnd.github+json", "User-Agent": `opengate/${VERSION}` },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (r.status < 500) break;
+    } catch (e) {
+      if (attempt === 2) throw e;
+    }
+    await Bun.sleep(1000 * (attempt + 1));
+  }
+  if (!r) throw new Error(`couldn't reach GitHub for the latest release of ${REPO()}`);
   if (!r.ok) throw new Error(`GitHub answered ${r.status} for the latest release of ${REPO()}`);
   const j: any = await r.json();
   return {
