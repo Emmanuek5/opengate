@@ -40,6 +40,8 @@ export interface Config {
   effort?: string;
   /** permission rules applied in every mode, e.g. { deny: ["shell:rm -rf *"], allow: ["shell:git status*"] } */
   permissions?: { allow?: string[]; deny?: string[] };
+  /** how long Claude keeps the cached prompt: "1h" (default; survives pauses) or "5m" (cheaper cache writes on pay-per-token keys) */
+  cacheTtl?: "5m" | "1h";
   /** the model that reviews actions in auto mode (default claude-haiku-5-5) */
   guardModel?: string;
   /** the safety guard (built-in blocks, auto-mode review); false turns it off by default (your permissions rules still apply) */

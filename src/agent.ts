@@ -60,6 +60,8 @@ export class Session {
   private running: AbortController | null = null;
   private system: string;
   private started: Promise<void> | null = null;
+  /** system prompt and tools are built once and kept, so the cached prefix stays identical */
+  private promptReady = false;
   /** the tools offered in the current prompt */
   private toolset: Tool[] = TOOLS;
   /** only offer these tools (by name); undefined offers all. Not saved. */
@@ -72,7 +74,16 @@ export class Session {
     public readonly gateway: Pick<Gateway, "llm"> & Partial<Pick<Gateway, "models" | "url">>,
     public readonly cfg: Config = {},
   ) {
-    this.system = systemPrompt(data.cwd);
+    this.system = systemPrompt(data.cwd, new Date(data.created));
+  }
+
+  /**
+   * Rebuild the system prompt and tool list before the next model call. Changing either one
+   * invalidates the whole prompt cache, so this only happens when something really changed
+   * (an MCP server's tools, /compact, an explicit reload), never on every message.
+   */
+  invalidatePrompt(): void {
+    this.promptReady = false;
   }
 
   static create(gateway: Session["gateway"], cfg: Config, o: NewSession): Session {
@@ -141,7 +152,8 @@ export class Session {
 
   /** The system prompt: built-in instructions plus every prompt section. */
   async systemPrompt(): Promise<string> {
-    let s = systemPrompt(this.data.cwd);
+    // The session's own start date, not today's, so a session running past midnight keeps its cache.
+    let s = systemPrompt(this.data.cwd, new Date(this.data.created));
     for (const sec of getPromptSections()) {
       try {
         const text = await sec.render(this);
@@ -197,8 +209,7 @@ export class Session {
     this.running = ac;
     try {
       await this.start();
-      this.toolset = await this.tools();
-      this.system = await this.systemPrompt();
+      await this.preparePrompt();
       const text = parts.filter((p) => p.type === "text").map((p: any) => p.text).join(" ").trim();
       if (!this.data.title && text) this.data.title = text.replace(/\s+/g, " ").slice(0, 80);
       if (this.data.contextUsed > this.contextSize * 0.8 && this.data.messages.length >= 2) await this.compact(ui, ac.signal);
@@ -211,10 +222,18 @@ export class Session {
     }
   }
 
+  private async preparePrompt(): Promise<void> {
+    if (this.promptReady) return;
+    this.toolset = await this.tools();
+    this.system = await this.systemPrompt();
+    this.promptReady = true;
+  }
+
   private async loop(ui: AgentUI, signal: AbortSignal): Promise<StopReason> {
-    const tools = this.toolset.map((t) => t.spec);
     for (let step = 0; step < MAX_STEPS; step++) {
       if (signal.aborted) return "cancelled";
+      await this.preparePrompt();
+      const tools = this.toolset.map((t) => t.spec);
       // Nearly full mid-turn: summarize and carry on.
       if (this.data.contextUsed > this.contextSize * 0.92) await this.compact(ui, signal, true);
       ui.step?.();
@@ -223,7 +242,7 @@ export class Session {
       let turn;
       try {
         turn = await this.llm().turn(
-          { model, system: this.system, messages: this.data.messages, tools, effort: this.data.effort, sessionId: this.id, signal },
+          { model, system: this.system, messages: this.data.messages, tools, effort: this.data.effort, sessionId: this.id, signal, cacheTtl: this.cfg.cacheTtl ?? "1h" },
           {
             text: (d) => {
               streamed += d;
@@ -373,6 +392,8 @@ export class Session {
     if (!midTurn) this.data.messages.push({ role: "assistant", parts: [{ type: "text", text: "Got it. I'll continue from this summary." }], ts: Date.now() });
     this.data.contextUsed = Math.ceil(note.length / 4);
     this.readFiles.clear();
+    // The history was replaced anyway, so this is the free moment to pick up new memories, skills and tools.
+    this.invalidatePrompt();
     this.save();
     ui.notice?.("Conversation compacted.", "info");
   }

@@ -59,7 +59,7 @@ export class AnthropicLlm implements Llm {
       messages: toAnthropic(req.model, req.messages),
       tools: req.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters as Anthropic.Tool.InputSchema })),
       // Cache the whole prefix; each turn only adds to the end.
-      cache_control: { type: "ephemeral" },
+      cache_control: { type: "ephemeral", ...(req.cacheTtl === "1h" ? { ttl: "1h" } : {}) } as any,
       stream: true,
       ...(modern ? { thinking: { type: "adaptive", display: "summarized" } as any, output_config: { effort: effort as any } } : {}),
     };

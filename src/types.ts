@@ -43,6 +43,8 @@ export interface LlmRequest {
   sessionId: string;
   signal?: AbortSignal;
   maxTokens?: number;
+  /** how long the provider should keep the cached prefix (Anthropic: "5m" or "1h") */
+  cacheTtl?: "5m" | "1h";
 }
 
 export interface LlmSink {

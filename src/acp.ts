@@ -5,6 +5,7 @@ import { EFFORTS, loadConfig, MODES, VERSION, type Config, type Mode } from "./c
 import { Gateway, groupModels, type GatewayModel } from "./gateway";
 import { listSessions, loadSession } from "./store";
 import { getCommand, getCommands } from "./ext";
+import { surface } from "./llm/util";
 import "./features";
 import { toolByName, type Diff, type ToolResult } from "./tools";
 import type { Part } from "./types";
@@ -194,6 +195,8 @@ export function createAgent(opts: { config?: () => Config; gateway?: (cfg: Confi
     .agent({ name: "opengate" })
     .onRequest("initialize", ({ params }) => {
       const cfg = getConfig();
+      surface.mode = "acp";
+      surface.client = String(params.clientInfo?.title || params.clientInfo?.name || "").replace(/[();]/g, "").slice(0, 40);
       return {
         protocolVersion: Math.min(params.protocolVersion ?? acp.PROTOCOL_VERSION, acp.PROTOCOL_VERSION),
         agentInfo: { name: "opengate", title: "OpenGate", version: VERSION },

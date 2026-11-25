@@ -56,6 +56,8 @@ interface McpState {
   taken: Set<string>;
   /** config entries that couldn't be used */
   problems: string[];
+  /** sessions to tell when a server's tool list changes */
+  sessions: Set<Session>;
 }
 
 // ---------------- configuration ----------------
@@ -276,6 +278,7 @@ async function connectOne(spec: ServerSpec, st: ServerState, state: McpState, cw
       const next = await listTools(client);
       for (const t of st.tools) state.taken.delete(t.spec.name);
       st.tools = next.map((t) => makeTool(st, t, mcpToolName(st.name, t.name, state.taken), state));
+      for (const s of state.sessions) s.invalidatePrompt();
     } catch {}
   });
 }
@@ -304,7 +307,7 @@ export function ensureMcp(session: Session, timeout = CONNECT_TIMEOUT): McpState
   if (state) return state;
   const { specs, problems } = collectServers(session);
   const servers: ServerState[] = specs.map((s) => ({ name: s.name, source: s.source, transport: s.transport, status: "connecting", tools: [], stderr: "" }));
-  state = { servers, ready: Promise.resolve(), announced: false, taken: new Set(), problems };
+  state = { servers, ready: Promise.resolve(), announced: false, taken: new Set(), problems, sessions: new Set([session]) };
   const s = state;
   state.ready = Promise.all(
     specs.map(async (spec, i) => {
@@ -338,10 +341,12 @@ export function shareMcp(parent: Session, child: Session): void {
   const state = ensureMcp(parent);
   child.runtime.set(KEY, state);
   child.runtime.set(BORROWED, true);
+  state.sessions.add(child);
 }
 
 export async function disposeMcp(session: Session): Promise<void> {
   const state = mcpState(session);
+  state?.sessions.delete(session);
   if (!state || session.runtime.get(BORROWED)) return;
   await state.ready.catch(() => {});
   await Promise.all(
